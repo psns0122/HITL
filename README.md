@@ -334,8 +334,19 @@ ACTION_REGISTRY["hold_carrier"] = ActionSpec(
 
 ## 사내 반입 체크리스트
 
-1. `.env` 에 사내 값 채우기 (`FAKE_LLM=0`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `MODEL_NAME`, `LOG_DIR`)
-2. `app/_llm.py` 의 `get_llm()` 을 사내 LLM 래퍼(`_llm.llm_t1`)로 교체
+1. `.env` 에 사내 값 채우기 — **변수 이름을 `pptx-vision-rag` 와 동일하게 맞춰뒀으니
+   기존 `.env` 의 게이트웨이 설정을 그대로 복사**하면 됩니다.
+   ```bash
+   FAKE_LLM=0
+   LLM_GATEWAY_BASE_URL=http://hcp.llm.skhynix.com/v1
+   LLM_GATEWAY_API_KEY=            # 사내 게이트웨이는 키 불필요 → 비워둠
+   LLM_CHAT_MODEL=glm-5.1
+   LOG_DIR=./devLogs
+   ```
+   (구 이름 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`MODEL_NAME` 도 폴백으로 인식합니다.)
+2. `app/_llm.py` 의 `get_llm()` 확인 — 이미 사내 게이트웨이 호출 패턴
+   (`ChatOpenAI(base_url=…, api_key=… or "EMPTY", max_tokens, max_retries, timeout)`)에
+   맞춰져 있습니다. 사내 공용 래퍼(`_llm.llm_t1`)가 따로 있으면 그것으로 교체하세요.
 3. `app/actions/mock_db.py` 를 실제 DB 조회로 교체 (함수 시그니처는 그대로 두면 나머지는 무수정)
 4. `app/_node.py` 의 Location/Status/Log/Extract 스텁을 사내 실제 노드로 교체
    — **`_serve_needs()` 호출만 유지**하면 needs-핸드오프가 그대로 동작합니다

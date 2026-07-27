@@ -85,15 +85,24 @@ class FakeEchoChatModel(BaseChatModel):
 
 
 def get_llm(model_name: str | None = None, temperature: float | None = None):
-    """에이전트 공용 LLM 팩토리. (사내 코드의 _llm.llm_t1 자리)"""
+    """에이전트 공용 LLM 팩토리. (사내 코드의 _llm.llm_t1 자리)
+
+    사내 게이트웨이는 OpenAI 호환 엔드포인트라 ChatOpenAI 로 붙는다.
+    호출 패턴은 사내 기존 프로젝트(pptx-vision-rag/llm_client.py)와 동일하게 맞췄다.
+    """
     if cfg.FAKE_LLM:
         return FakeEchoChatModel()
     from langchain_openai import ChatOpenAI
     return ChatOpenAI(
-        base_url=cfg.OPENAI_BASE_URL,
-        api_key=cfg.OPENAI_API_KEY,
-        model=model_name or cfg.MODEL_NAME,
+        base_url=cfg.GATEWAY_BASE_URL,
+        # 게이트웨이가 키를 요구하지 않아 빈 값이 와도 동작하도록 placeholder 사용
+        # (OpenAI SDK 는 빈 키를 거부한다)
+        api_key=cfg.GATEWAY_API_KEY or "EMPTY",
+        model=model_name or cfg.CHAT_MODEL,
         temperature=cfg.TEMPERATURE if temperature is None else temperature,
+        max_tokens=cfg.MAX_TOKENS,
+        max_retries=cfg.LLM_MAX_RETRIES,
+        timeout=cfg.LLM_TIMEOUT,      # 무한 대기 방지 — 멈춤 대신 명확한 타임아웃 에러
     )
 
 
