@@ -315,16 +315,35 @@ ACTION_REGISTRY["hold_carrier"] = ActionSpec(
 
 ## ActionAgent 구현 방식 두 가지 (브랜치 비교)
 
-| | `claude/hitl-langgraph-chatbot-e67urt` (이 브랜치) | `...-singlenode` |
+| | `claude/hitl-langgraph-chatbot-e67urt` | `...-singlenode` (이 브랜치) |
 |---|---|---|
-| 형태 | **서브그래프** — 노드/엣지로 분리 | **단일 노드 + 내부 while 루프** |
+| 형태 | 서브그래프 — 노드/엣지로 분리 | **단일 노드 + 내부 while 루프** |
 | interrupt 배치 | 노드당 정확히 1개 (`collect_param`, `confirm`) | 한 노드 안에 여러 개 (순서 매칭 의존) |
-| resume 재실행 | 작은 노드만 재실행 → 안전 | 노드 전체 재실행 → 진입 로그·연산 중복 |
+| resume 재실행 | 작은 노드만 재실행 | **노드 전체 재실행** |
+| **토큰 비용(실측)** | **163 tok** | **261 tok (+60%)** |
 | 흐름 가독성 | 엣지가 곧 순서도 | 코드를 읽어야 순서를 앎 |
-| 파일 수 | 많음 | 적음 |
+| 코드량 | `graph.py` 398줄 (노드 11개) | `graph.py` 약 290줄 (함수 1개) |
 
-두 브랜치는 `app/actions/graph.py` 와 `_node.py` 의 위임부만 다르고 나머지는 동일해서,
-**두 브랜치의 diff 가 곧 두 방식의 차이**입니다.
+두 브랜치는 **`app/actions/graph.py` 단 한 파일만** 다릅니다. 나머지는 완전히 동일하고
+테스트(시나리오 12종 + SSE 8종)도 양쪽 다 통과하므로, **두 브랜치의 diff 가 곧 두 방식의 차이**입니다.
+
+### 토큰 차이가 나는 이유
+
+동일한 흐름("6PDMQ283 반송해줘" → 목적지 입력 → 승인, `/chat/stream` 3회)을 돌렸을 때
+측정한 값입니다. 단일 노드 버전은 **resume 할 때마다 노드 전체가 맨 위부터 재실행**되므로
+루프 위쪽의 `infer_intent` LLM 호출이 3번 반복됩니다.
+
+```
+서브그래프  : Router 21 + Supervisor 23 + infer_intent 49 + FinalAnswer 70  = 163
+단일 노드   : Router 21 + Supervisor 23 + ActionAgent 147   + FinalAnswer 70  = 261
+                                          └ infer_intent × 3회 (재실행 이중 과금)
+```
+
+서브그래프 버전은 `infer_intent` 를 별도 노드로 분리해, 완료된 노드는 재실행되지 않게 만들어
+이 비용을 구조적으로 피합니다. HITL 왕복이 많아질수록 격차가 커집니다.
+
+**권장: 서브그래프 버전.** 단일 노드 버전은 흐름이 한 함수에 모여 있어 읽기 쉽다는 장점이 있어
+비교용으로 남겨둡니다.
 
 ---
 
