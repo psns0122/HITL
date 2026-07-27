@@ -1,13 +1,21 @@
-"""ActionAgent — HITL 서브그래프.
+"""ActionAgent — HITL 서브그래프 (턴 기반, interrupt 없음).
 
 부모 그래프에서는 Supervisor 밑 member 노드 하나로 보이지만, 내부는
 파라미터 수집(HITL 루프) → 검증(재시도 루프) → 실행 승인(HITL) → 실행의
 결정적 상태 기계다.
 
-interrupt 재실행 규칙(핵심):
-- interrupt 된 노드는 resume 시 노드 맨 위부터 재실행된다.
-- 따라서 interrupt 는 side-effect 없는 작은 노드(collect_param / confirm)에
-  노드당 정확히 1개만 둔다. 실제 실행(execute)은 승인 이후에만 도달한다.
+턴 기반 HITL 규칙(핵심):
+- 이 그래프는 LangGraph interrupt() 를 쓰지 않는다. 사용자에게 물을 게
+  생기면 질문을 action.awaiting 에 싣고 **턴을 정상 종료**한다
+  (ask_param / ask_confirm). Supervisor 가 awaiting 을 보고 턴을 닫는다.
+- 사용자의 답변은 항상 **새 턴**으로 들어와 Router → Supervisor 를 거쳐
+  이 그래프에 재진입한다(entry 가 awaiting + 새 HumanMessage 를 보고
+  merge_param / confirm_verdict 로 보낸다).
+  => "모든 사용자 입력은 Router 와 Supervisor 를 탄다"는 불변식이
+     HITL 답변에도 그대로 성립한다.
+- 상태의 근거는 오직 action 스크래치다. 어느 턴에서 다시 들어와도
+  스크래치만 보고 이어간다. 실제 실행(execute)은 명시적 승인 이후에만
+  도달한다.
 
 needs-핸드오프:
 - 사용자의 답변에 값이 간접적으로 실려 있으면(직접 판독 불가) interrupt 가
@@ -23,7 +31,6 @@ needs-핸드오프:
 """
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
 
 import app.config as cfg
 from app._agent import extract_intent
@@ -71,13 +78,52 @@ def _looks_substantive(text: str) -> bool:
 # ── 노드들 ────────────────────────────────────────────────────────────────
 
 def entry_node(state: AgentState, config) -> dict:
-    """재진입 판정: 진행 중 스크래치가 있으면 infer_intent 를 건너뛴다."""
+    """진입 판정 — 이 노드가 턴 기반 HITL 의 관제탑이다.
+
+    우선순위:
+      1) needs 메일박스 복귀  -> param_check (헬퍼 답변 회수)
+      2) awaiting + 새 사용자 발화 -> 그 발화를 '질문에 대한 답'으로 소비
+         (collect_param 질문이었으면 merge_param, confirm 이었으면
+          confirm_verdict 로)
+      3) 진행 중 스크래치     -> param_check 부터 재개
+      4) 그 외               -> infer_intent (신규 액션)
+    """
     sc = _scratch(state)
-    reentry = sc.get("phase") in ACTIVE_PHASES
-    _log("entry", f"enter (reentry={reentry}, phase={sc.get('phase')})")
-    emit(config, "agent_status",
-         {"agent": "ActionAgent", "detail": "재진입(수집 재개)" if reentry else "신규 진입"})
-    sc["_route"] = "param_check" if reentry else "infer_intent"
+    msgs = state.get("messages") or []
+    awaiting = sc.get("awaiting")
+
+    # 1) 헬퍼 결과 회수가 최우선 (같은 턴 안의 needs 왕복 복귀)
+    if sc.get("needs"):
+        _log("entry", "needs 복귀 -> param_check")
+        emit(config, "agent_status", {"agent": "ActionAgent", "detail": "헬퍼 결과 회수"})
+        sc["_route"] = "param_check"
+        return {"action": sc}
+
+    # 2) 질문을 던져놓고 기다리던 중 + 마지막 메시지가 사용자 발화
+    #    = 새 턴으로 들어온 HITL 답변이다. (Router/Supervisor 를 거쳐 왔다)
+    if awaiting and msgs and isinstance(msgs[-1], HumanMessage):
+        answer = last_human_text(msgs)
+        _log("entry", f"HITL 답변 수신({awaiting['type']}): {answer!r}")
+        emit(config, "agent_status",
+             {"agent": "ActionAgent", "detail": f"사용자 응답 수신({awaiting['type']})"})
+        sc.pop("awaiting", None)
+        sc["pending_answer"] = answer
+        sc["_route"] = ("confirm_verdict" if awaiting["type"] == "confirm"
+                        else "merge_param")
+        return {"action": sc}
+
+    # 3) 진행 중 스크래치 (awaiting 인데 새 발화가 없으면 질문을 다시 조립한다)
+    if sc.get("phase") in ACTIVE_PHASES:
+        _log("entry", f"재진입 (phase={sc.get('phase')})")
+        emit(config, "agent_status", {"agent": "ActionAgent", "detail": "재진입(수집 재개)"})
+        sc.pop("awaiting", None)
+        sc["_route"] = "param_check"
+        return {"action": sc}
+
+    # 4) 신규 진입
+    _log("entry", "신규 진입")
+    emit(config, "agent_status", {"agent": "ActionAgent", "detail": "신규 진입"})
+    sc["_route"] = "infer_intent"
     return {"action": sc}
 
 
@@ -184,8 +230,8 @@ def param_check_node(state: AgentState, config) -> dict:
             return {"action": sc}
         sc["pending_field"] = sc["missing"][0]
         sc["phase"] = "collecting"
-        sc["_route"] = "collect_param"
-        _log("param_check", f"미충족 -> collect '{sc['pending_field']}'")
+        sc["_route"] = "ask_param"
+        _log("param_check", f"미충족 -> ask '{sc['pending_field']}'")
         return {"action": sc}
 
     # 3) 충족 → 검증
@@ -195,11 +241,12 @@ def param_check_node(state: AgentState, config) -> dict:
     return {"action": sc}
 
 
-def collect_param_node(state: AgentState, config) -> dict:
-    """⏸ HITL #1 — 부족한 파라미터를 사용자에게 질문.
+def ask_param_node(state: AgentState, config) -> dict:
+    """⏸ HITL #1 — 부족한 파라미터를 사용자에게 질문하고 **턴을 끝낸다**.
 
-    주의: 이 노드는 resume 시 맨 위부터 재실행된다. interrupt 위에는
-    로그/프롬프트 조립 외 어떤 side-effect 도 두지 않는다.
+    interrupt 가 아니다. 질문 payload 를 action.awaiting 에 싣고 서브그래프를
+    정상 종료하면, Supervisor 가 awaiting 을 보고 턴을 닫는다(END).
+    사용자의 답변은 다음 턴에 Router → Supervisor 를 거쳐 돌아온다.
     """
     sc = _scratch(state)
     fieldname = sc.get("pending_field")
@@ -210,20 +257,24 @@ def collect_param_node(state: AgentState, config) -> dict:
     note = sc.pop("last_parse_error", None)
     if note:
         prompt = f"{note}\n{prompt}"
-    _log("collect_param", f"⏸ interrupt field={fieldname}")
 
-    answer = interrupt({
+    sc["awaiting"] = {
         "type": "collect_param",
         "action": sc.get("action"),
         "field": fieldname,
         "prompt": prompt,
         "params": sc.get("params", {}),
         "missing": sc.get("missing", []),
-    })
+    }
+    _log("ask_param", f"⏸ 질문 남기고 턴 종료 field={fieldname}")
 
-    _log("collect_param", f"resume answer={answer!r}")
-    sc["pending_answer"] = answer
-    return {"action": sc}
+    return {
+        "action": sc,
+        # 질문을 대화에도 남긴다 — Supervisor 의 '방금 물었음' 판정과
+        # 다음 턴 컨텍스트의 근거가 된다.
+        "messages": [AIMessage(content=prompt, name="ActionAgent")],
+        "next": "Supervisor",
+    }
 
 
 def _read_ids(text: str, config) -> dict:
@@ -360,8 +411,8 @@ def validate_node(state: AgentState, config) -> dict:
 
     if v["ok"]:
         sc["phase"] = "confirming"
-        sc["_route"] = "confirm"
-        _log("validate", "PASS -> confirm")
+        sc["_route"] = "ask_confirm"
+        _log("validate", "PASS -> ask_confirm")
         return {"action": sc}
 
     sc["validate_retries"] = sc.get("validate_retries", 0) + 1
@@ -381,23 +432,38 @@ def validate_node(state: AgentState, config) -> dict:
     return {"action": sc}
 
 
-def confirm_node(state: AgentState, config) -> dict:
-    """⏸ HITL #2 — 실행 직전 최종 승인. interrupt 위 side-effect 금지."""
+def ask_confirm_node(state: AgentState, config) -> dict:
+    """⏸ HITL #2 — 실행 직전 최종 승인 질문을 남기고 **턴을 끝낸다**."""
     sc = _scratch(state)
     spec = ACTION_REGISTRY[sc["action"]]
     guidance = spec.confirm_text(sc["params"])
-    _log("confirm", f"⏸ interrupt guidance=\n{guidance}")
 
-    decision = interrupt({
+    sc["awaiting"] = {
         "type": "confirm",
         "action": sc["action"],
         "prompt": guidance,
         "params": sc["params"],
         "options": ["승인", "거절"],
-    })
+    }
+    _log("ask_confirm", f"⏸ 승인 질문 남기고 턴 종료\n{guidance}")
+
+    return {
+        "action": sc,
+        "messages": [AIMessage(content=guidance, name="ActionAgent")],
+        "next": "Supervisor",
+    }
+
+
+def confirm_verdict_node(state: AgentState, config) -> dict:
+    """승인 질문에 대한 답변 판정. 새 턴으로 들어온 답을 entry 가 넘겨준다.
+
+    execute 로 가는 유일한 길은 명시적 approve 뿐이다.
+    """
+    sc = _scratch(state)
+    decision = sc.pop("pending_answer", None)
 
     verdict = resolvers.detect_confirm_verdict(decision)
-    _log("confirm", f"resume decision={decision!r} -> {verdict}")
+    _log("confirm_verdict", f"decision={decision!r} -> {verdict}")
     sc["confirm"] = verdict
 
     # 승인 — 유일하게 execute 로 가는 길
@@ -422,7 +488,7 @@ def confirm_node(state: AgentState, config) -> dict:
         sc["phase"] = "abandoned"
         sc["abandon_reason"] = "승인 여부를 확인하지 못해 명령을 종료합니다."
         sc["_route"] = "abandon"
-        _log("confirm", "판정 불가 + ID 후보 없음 -> abandon")
+        _log("confirm_verdict", "판정 불가 + ID 후보 없음 -> abandon")
         return {"action": sc}
 
     ids = id_lookup_tool(cands)
@@ -436,7 +502,7 @@ def confirm_node(state: AgentState, config) -> dict:
             sc["params"]["carrier_id"] = ids["carrier_ids"][0]
         if ids["eqp_ids"]:
             sc["params"]["eqp_id"] = ids["eqp_ids"][0]
-        _log("confirm", f"파라미터 정정 -> params={sc['params']}")
+        _log("confirm_verdict", f"파라미터 정정 -> params={sc['params']}")
     else:
         # 고치려 한 건 분명한데 조회가 안 되는 ID -> 그 자리만 비우고 다시 묻는다.
         # 어느 파라미터를 고치려는지 모를 땐 마지막 필수 파라미터로 본다
@@ -446,7 +512,7 @@ def confirm_node(state: AgentState, config) -> dict:
         sc["params"].pop(target, None)
         sc["last_parse_error"] = (
             f"'{', '.join(ids['unknown'])}' 은(는) 조회되지 않는 ID 입니다.")
-        _log("confirm", f"정정 실패 -> {target} 비우고 재수집 (unknown={ids['unknown']})")
+        _log("confirm_verdict", f"정정 실패 -> {target} 비우고 재수집 (unknown={ids['unknown']})")
 
     sc["phase"] = "param_check"
     sc["_route"] = "param_check"
@@ -554,10 +620,11 @@ def build_action_graph():
     g.add_node("action_entry", entry_node)
     g.add_node("infer_intent", infer_intent_node)
     g.add_node("param_check", param_check_node)
-    g.add_node("collect_param", collect_param_node)
+    g.add_node("ask_param", ask_param_node)
     g.add_node("merge_param", merge_param_node)
     g.add_node("validate", validate_node)
-    g.add_node("confirm", confirm_node)
+    g.add_node("ask_confirm", ask_confirm_node)
+    g.add_node("confirm_verdict", confirm_verdict_node)
     g.add_node("execute", execute_node)
     g.add_node("finalize", finalize_node)
     g.add_node("abandon", abandon_node)
@@ -565,24 +632,30 @@ def build_action_graph():
     g.add_node("needs_exit", needs_exit_node)
 
     g.add_edge(START, "action_entry")
+    # entry 가 답변/복귀/신규를 가른다 (턴 기반의 관제탑)
     g.add_conditional_edges("action_entry", _route,
-                            {"infer_intent": "infer_intent", "param_check": "param_check"})
+                            {"infer_intent": "infer_intent", "param_check": "param_check",
+                             "merge_param": "merge_param",
+                             "confirm_verdict": "confirm_verdict"})
     g.add_edge("infer_intent", "param_check")
     g.add_conditional_edges("param_check", _route,
-                            {"collect_param": "collect_param", "validate": "validate",
+                            {"ask_param": "ask_param", "validate": "validate",
                              "needs_exit": "needs_exit", "abandon": "abandon"})
-    g.add_edge("collect_param", "merge_param")
     g.add_conditional_edges("merge_param", _route,
                             {"param_check": "param_check", "abandon": "abandon",
                              "restart": "restart"})
     g.add_conditional_edges("validate", _route,
-                            {"confirm": "confirm", "param_check": "param_check",
+                            {"ask_confirm": "ask_confirm", "param_check": "param_check",
                              "abandon": "abandon"})
-    # confirm 은 승인/거절 외에 '파라미터 정정' 으로 수집 루프에 되돌아갈 수 있다
-    g.add_conditional_edges("confirm", _route,
+    # 승인 답변은 execute/abandon 외에 '파라미터 정정'으로 수집 루프에 돌아갈 수 있다
+    g.add_conditional_edges("confirm_verdict", _route,
                             {"execute": "execute", "abandon": "abandon",
                              "param_check": "param_check"})
     g.add_edge("execute", "finalize")
+    # 질문을 던진 노드는 서브그래프를 끝낸다 (부모 엣지로 Supervisor 복귀,
+    # Supervisor 가 awaiting 을 보고 턴을 닫는다)
+    g.add_edge("ask_param", END)
+    g.add_edge("ask_confirm", END)
     g.add_edge("finalize", END)
     g.add_edge("abandon", END)
     g.add_edge("restart", END)
@@ -592,6 +665,7 @@ def build_action_graph():
 
 
 ACTION_SUBGRAPH_NODES = {
-    "action_entry", "infer_intent", "param_check", "collect_param", "merge_param",
-    "validate", "confirm", "execute", "finalize", "abandon", "restart", "needs_exit",
+    "action_entry", "infer_intent", "param_check", "ask_param", "merge_param",
+    "validate", "ask_confirm", "confirm_verdict", "execute", "finalize",
+    "abandon", "restart", "needs_exit",
 }

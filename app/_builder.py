@@ -97,6 +97,8 @@ def build_team_graph(model_name: str = None, checkpointer=None):
     supervisor_conditional_map = {m: m for m in _node.members}
     supervisor_conditional_map["FinalAnswerAgent"] = "FinalAnswerAgent"
     supervisor_conditional_map["FINISH"] = "FinalAnswerAgent"
+    # HITL 질문을 던진 턴은 FinalAnswer 없이 그대로 끝난다 (사용자 응답 대기)
+    supervisor_conditional_map["END"] = END
     workflow.add_conditional_edges("Supervisor", lambda s: s["next"], supervisor_conditional_map)
 
     workflow.add_edge("FinalAnswerAgent", END)

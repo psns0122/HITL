@@ -141,19 +141,18 @@ async def main():
         assert "실행하지 않았습니다" in answer, repr(answer)
         print("5) 거절 경로 PASS")
 
-        # ── 6) /chat/stop 이 interrupt 대기 스레드를 정리하는가
+        # ── 6) /chat/stop 이 HITL 대기(진행 중 액션)를 정리하는가
         _, ev = await stream(client, "sse-C", "7HITL001 반송해줘")
         assert first(ev, "needs_input"), kinds(ev)
 
         r = await client.post(f"{BASE}/chat/stop", json={"thread_id": "sse-C"})
-        assert r.json()["mode"] == "aborted_interrupt", r.text
+        assert r.json()["mode"] == "aborted_action", r.text
 
         from app.api.graph_service import get_team_graph
-        from app.api.routes import _collect_interrupts
         graph, _ = await get_team_graph(None)
         snap = await graph.aget_state({"configurable": {"thread_id": "sse-C"}})
-        assert not _collect_interrupts(snap), snap.interrupts
-        print("6) /chat/stop (interrupt 정리) PASS")
+        assert not ((snap.values or {}).get("action") or {}), (snap.values or {}).get("action")
+        print("6) /chat/stop (액션 스크래치 정리) PASS")
 
         # ── 7) needs-핸드오프
         _, ev = await stream(client, "sse-D", "6PDMQ283 를 9ZXCV456 있는 위치로 반송해줘")

@@ -67,11 +67,15 @@ python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실
                  └──────────────────┘
 ```
 
-### ActionAgent 내부 (⏸ = interrupt 지점)
+### ActionAgent 내부 (⏸ = 질문 남기고 턴 종료)
 
 ```
  Supervisor ──▶ [ActionAgent 서브그래프]
         ▼
+   ┌────────────┐  entry: 답변 소비 / 복귀 / 신규 판정 (턴 기반의 관제탑)
+   │action_entry│
+   └─────┬──────┘
+         ▼ (신규)
    ┌────────────┐  의도/파라미터/참조 추출 (재진입이면 건너뜀)
    │infer_intent│
    └─────┬──────┘
@@ -81,47 +85,57 @@ python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실
    └─────┬──────┘                                      │
     ┌────┼──────────┬──────────────┐                   │
     ▼    ▼          ▼              ▼                   │
- collect  validate  needs_exit   abandon                │
- _param⏸   │        (동료에게      (취소/한도)            │
-    │      │         양보)                              │
-    ▼      │ 실패 → bad 필드만 비우고 ────────────────────┘
- merge_param          재수집 (MAX_VALIDATE)
-    │ 4분기: 취소 / 리터럴 / 참조(needs) / 해석불능
+ ask_    validate  needs_exit   abandon                │
+ param⏸    │        (Supervisor    (취소/한도)          │
+    │      │         에 상담)                           │
+ (턴종료)  │ 실패 → bad 필드만 비우고 ────────────────────┘
+    ▼      │          재수집 (MAX_VALIDATE)
+ merge_param  ← 다음 턴에 entry 가 답변을 들고 보내줌
+    │ 분기: 취소 / 값 / 상담 / 맥락이탈 / 해석불능
     └──▶ param_check
            validate 통과 ▼
-                    ┌──────────┐
-                    │ confirm ⏸│  "진짜 실행할까요?"
-                    └────┬─────┘
-              거절 ◀─────┴─────▶ 승인
-                │                │
-            abandon           execute  ← 실제 side-effect 는 여기서만
-                └────────┬────────┘
-                         ▼ finalize → END → Supervisor → FinalAnswerAgent
+                 ┌────────────┐
+                 │ask_confirm⏸│  "진짜 실행할까요?" (턴 종료)
+                 └────┬───────┘
+                      ▼ 다음 턴에 entry → confirm_verdict
+              거절 ◀──┴──▶ 승인
+                │           │
+            abandon      execute  ← 실제 side-effect 는 여기서만
+                └────┬──────┘
+                     ▼ finalize → END → Supervisor → FinalAnswerAgent
 ```
 
 ---
 
-## HITL 메커니즘 — 5개 후보 중 무엇을 썼나
+## HITL 메커니즘 — 턴 기반 (interrupt 를 쓰지 않는 이유)
 
-| 후보 | 실존 여부 | 판정 |
-|---|---|---|
-| `interrupt_before` | ⭕ 정적 interrupt | 노드 **앞**에서만 멈춤. 페이로드를 못 실어 "무엇이 부족한지" 전달 불가 → 부적합 |
-| `interrupt_after` | ⭕ 정적 interrupt | 노드 **뒤**에서만. 마찬가지로 부적합 |
-| **`interrupt()` + `Command(resume=)`** | ⭕ 동적 | **채택.** 노드/툴 내부에서 멈추고 구조화 페이로드 전달·재개 |
-| `Command.PAUSE` | ❌ 존재하지 않음 | `Command` 의 멤버는 `resume`/`update`/`goto` 뿐입니다. 폐기 |
-| `__interrupt__` 상태 | △ 절반만 맞음 | 트리거가 아니라 인터럽트가 **표면화되는 키**. 감지용으로만 사용 |
+**모든 사용자 입력은 예외 없이 Router → Supervisor 를 경유한다** — 이 구조
+불변식이 이 그래프의 제1 요구사항입니다. LangGraph 의 `interrupt()` +
+`Command(resume=)` 는 재개 시 **멈췄던 노드로 직행**하기 때문에 HITL 답변이
+Router/Supervisor 를 우회하게 되어, 이 불변식과 양립할 수 없습니다.
 
-> `raise NodeInterrupt(...)` 는 deprecated 라 쓰지 않았습니다.
+그래서 HITL 을 턴 기반 상태 기계로 구현합니다:
 
-### 반드시 지켜야 하는 재개 규칙 (버전 민감)
+1. **질문 = 턴의 정상 종료.** 사용자에게 물을 게 생기면 질문 payload 를
+   `action.awaiting` 에 싣고 서브그래프를 끝낸다(`ask_param`/`ask_confirm`).
+   Supervisor 가 awaiting 을 보고 턴을 닫는다 (FinalAnswer 없이 END).
+2. **답변 = 새 턴.** 사용자의 답은 신규 질문과 똑같이
+   `{"messages":[HumanMessage(...)]}` 로 들어온다. Router 가 진행 중 액션을
+   보고 Supervisor 로 고정하고(결정적 — LLM 오분류 여지 없음), Supervisor 가
+   ActionAgent 로 보내면, entry 가 awaiting + 새 HumanMessage 를 보고 그
+   발화를 답변으로 소비한다.
+3. **상태의 근거는 오직 `action` 스크래치.** 그래프가 물리적으로 멈춰 있을
+   필요가 없으므로, 고아 인터럽트·모델 전환 시 재개 유실·동시 resume 경쟁
+   같은 인터럽트 생명주기 문제가 계열째 사라진다.
 
-1. **interrupt 된 노드는 resume 시 맨 위부터 재실행됩니다.**
-   → interrupt 위쪽에 side-effect(실제 액션·외부 쓰기·LLM 호출)를 두면 재개마다 반복 실행/이중 과금됩니다.
-   → 이 구현은 실제 실행을 승인 이후 `execute` 노드에만 두어 구조적으로 회피합니다.
-2. 한 노드에 interrupt 가 여러 개면 **실행 순서(positional)** 로 resume 값이 매칭됩니다.
-   → `collect_param` / `confirm` **노드당 정확히 1개**만 두었습니다.
-3. **인터럽트 감지는 이벤트가 아니라 상태 검사로** 합니다.
-   `astream_events` 를 다 돌린 뒤 `aget_state()` 의 `interrupts` 를 보는 것이 정석입니다.
+### 지켜야 하는 규칙
+
+1. **실제 실행(side-effect)은 명시적 승인 뒤 `execute` 노드에만** 둡니다.
+   승인 판정(`confirm_verdict`)에서 execute 로 가는 길은 approve 하나뿐입니다.
+2. **HITL 대기 감지는 이벤트가 아니라 상태 검사로** 합니다.
+   `astream_events` 를 다 돌린 뒤 `aget_state()` 의 `action.awaiting` 을 봅니다.
+3. finalize/abandon/restart 에서 **스크래치를 반드시 `{}` 로 리셋**합니다 —
+   안 하면 다음 요청이 이전 명령으로 오염됩니다.
 
 ---
 
@@ -147,11 +161,10 @@ python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실
 | `model_name` | `null` | 프론트에서 고른 모델. `null` 이면 `.env` 기본 모델. |
 | `recursion_limit` | `20` | LangGraph recursion limit (`ge=1`, `le=200`). |
 
-**같은 엔드포인트가 신규 질문과 HITL 답변을 모두 처리합니다.** 서버가 체크포인터 상태를 보고
-판정합니다.
-
-- 인터럽트 없음 → `{"messages": [HumanMessage(query)]}` 로 신규 턴
-- 인터럽트 있음 → `Command(resume=query)` 로 재개
+**같은 엔드포인트가 신규 질문과 HITL 답변을 모두 처리합니다.** 어느 쪽이든
+입력 경로는 동일합니다 — 항상 `{"messages": [HumanMessage(query)]}` 새 턴으로
+들어가 Router → Supervisor 를 경유하고, 진행 중 액션이 있으면 Supervisor 가
+ActionAgent 로 보냅니다. (HITL 답변이라고 그래프 중간으로 직행하는 일은 없습니다)
 
 #### 스트림 포맷
 
@@ -174,7 +187,7 @@ python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실
 | `node_enter` | 그래프 노드 진입 | `{agent, node}` — 트레이스 창 |
 | `tool_call` | 툴 호출 | `{agent, tool, args, result?}` |
 | `agent_status` | 에이전트 상태 한 줄 | `{agent, detail}` |
-| `needs_input` | **HITL 로 멈춤** | `{kind: collect_param\|confirm, prompt, field?, action, params, options?, resume_token}` |
+| `needs_input` | **HITL 대기 (턴 종료)** | `{kind: collect_param\|confirm, prompt, field?, action, params, options?}` |
 | `thinking` | 중간 에이전트 토큰 (기본 off) | `{agent, text}` — `SHOW_THINKING_TOKENS=1` 일 때만 |
 | `usage` | 턴 종료 | 토큰/시간 집계 |
 | `done` | 종료 | `{reason: complete\|interrupted\|stopped\|error}` |
@@ -191,9 +204,9 @@ python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실
 
 - **실행 중**: `app.state.stop_flags[thread_id]` 를 세워 스트림 루프를 다음 이벤트에서
   탈출시킵니다.
-- **인터럽트 대기 중**: 사실 실행 중이 아니라 멈춰 있는 상태입니다. 그냥 두면 인터럽트가 남아
-  다음 질문이 "답변"으로 오인되므로, abort 센티널(`Command(resume={"aborted": True})`)로
-  재개해 `abandon` 경로를 태워 깨끗이 정리합니다.
+- **HITL 대기 중 (진행 중 액션)**: 턴 기반이라 그래프는 이미 끝나 있고 `action`
+  스크래치만 남아 있습니다. `aupdate_state(config, {"action": {}})` 로 리셋하면
+  끝 — 다음 질문은 오염 없이 새로 라우팅됩니다.
 
 ### `GET /llm/api/models`
 
@@ -258,7 +271,7 @@ async def get_team_graph(model_name=None):
 Supervisor 가 자기 로스터로 판단합니다. 그래서 **워커를 새로 붙이면 배분
 프롬프트에 설명 한 줄 추가하는 것만으로 needs 상담 대상에 자동 편입**됩니다
 (ActionAgent·워커 본문 수정 없음). HITL 과 대칭 구조이기도 합니다 —
-**사람에게 물으면 `interrupt()`, 동료에게 물으면 `needs`.**
+**사람에게 물으면 `awaiting`(턴 종료), 동료에게 물으면 `needs`(턴 내 상담).**
 
 가드: `MAX_HOPS` 왕복 상한 + 상담 실패도 재질문 1회로 계수(`MAX_COLLECT`).
 도와줄 워커가 없거나 답에서 값을 못 읽으면 **HITL 로 강등**해 사용자에게 직접 묻습니다.
@@ -267,10 +280,10 @@ Supervisor 가 자기 로스터로 판단합니다. 그래서 **워커를 새로
 
 ## 액션 도중 탈출
 
-모든 interrupt 지점에서 빠져나올 수 있습니다.
+모든 HITL 대기 지점에서 빠져나올 수 있습니다.
 
-- **대화로**: resume 답변을 값/승인으로 해석하기 **전에** 취소 의도("취소/그만/됐어")를 먼저 검사 → `abandon`
-- **버튼/stop**: `/chat/stop` 이 abort 센티널로 재개 → `abandon`
+- **대화로**: 답변을 값/승인으로 해석하기 **전에** 취소 의도("취소/그만/됐어")를 먼저 검사 → `abandon`
+- **버튼/stop**: `/chat/stop` 이 `action` 스크래치를 리셋 → 대기 해제
 
 `abandon` 은 안내 메시지를 남기고 스크래치를 리셋합니다. 거절은 **재시도 루프를 돌지 않습니다.**
 
@@ -333,8 +346,7 @@ Streamlit 이 이를 `st.status` 에 흘려서 "Supervisor 판단 중… / Locat
 처럼 보여줍니다.
 
 중간 에이전트의 **토큰 단위** 스트리밍이 필요하면 `.env` 의 `SHOW_THINKING_TOKENS=1` 로 켜면
-`thinking` 이벤트가 추가로 흐릅니다. 다만 interrupt 하는 노드에서 토큰을 흘리면 **재개 시 중복
-방출**되므로 ActionAgent 는 interrupt 위쪽에서 스트리밍하지 않도록 짜여 있습니다.
+`thinking` 이벤트가 추가로 흐릅니다.
 
 ---
 
@@ -432,18 +444,19 @@ ACTION_REGISTRY["hold_carrier"] = ActionSpec(
 
 ---
 
-## ActionAgent 구현 방식 두 가지 (브랜치 비교)
+## HITL 구현 방식 두 가지 (브랜치 비교)
 
-| | `claude/hitl-langgraph-chatbot-e67urt` (이 브랜치) | `...-singlenode` |
+| | `hitl_new` (이 브랜치) — 턴 기반 | 구 브랜치 — interrupt 기반 |
 |---|---|---|
-| 형태 | **서브그래프** — 노드/엣지로 분리 | **단일 노드 + 내부 while 루프** |
-| interrupt 배치 | 노드당 정확히 1개 (`collect_param`, `confirm`) | 한 노드 안에 여러 개 (순서 매칭 의존) |
-| resume 재실행 | 작은 노드만 재실행 → 안전 | 노드 전체 재실행 → 진입 로그·연산 중복 |
-| 흐름 가독성 | 엣지가 곧 순서도 | 코드를 읽어야 순서를 앎 |
-| 파일 수 | 많음 | 적음 |
+| HITL 답변 경로 | **항상 Router → Supervisor 경유** (새 턴) | 멈춘 노드로 직행 (`Command(resume=)`) |
+| 대기 상태 | `action.awaiting` (그냥 데이터) | 체크포인터의 인터럽트 (그래프가 물리적으로 멈춤) |
+| 모델 전환 중 답변 | 안전 (상태는 스레드에 붙음) | 체크포인터 공유 필수, 관리 소홀 시 재개 유실 |
+| /chat/stop | `action` 스크래치 리셋 한 줄 | abort 센티널로 재개해 abandon 경로 태우기 |
+| LangGraph 정합성 | 정석 패턴(interrupt) 아님 | 정석 패턴 |
 
-두 브랜치는 `app/actions/graph.py` 와 `_node.py` 의 위임부만 다르고 나머지는 동일해서,
-**두 브랜치의 diff 가 곧 두 방식의 차이**입니다.
+`notebooks/hitl_demo.ipynb` 는 interrupt 기반(구 브랜치) 기준으로 작성된
+데모입니다 — 이 브랜치에서는 `tests/test_hitl_scenarios.py` 가 살아 있는
+사용 예시입니다.
 
 ---
 
@@ -487,12 +500,11 @@ ACTION_REGISTRY["hold_carrier"] = ActionSpec(
 > `ImportError` 로 죽습니다. 그래서 **1.0.8 로 고정**했습니다.
 > 사내에서 이미 1.0.9+ 가 깔려 있다면 `pip install langgraph-prebuilt==1.0.8` 로 내려야 합니다.
 
-`requirements.txt` 는 위 버전들을 **정확히 고정(`==`)** 합니다. LangGraph 는
-`interrupt()`/`Command`/`StateSnapshot.interrupts` API 가 버전마다 달라, 올리면 HITL 재개가
-깨질 수 있어서입니다. 나머지(fastapi/uvicorn/streamlit/httpx/python-dotenv)는 사내
+`requirements.txt` 는 위 버전들을 **정확히 고정(`==`)** 합니다. (턴 기반 전환으로
+interrupt API 의존은 사라졌지만, 체크포인터/서브그래프 동작도 버전을 타므로 고정은 유지합니다.) 나머지(fastapi/uvicorn/streamlit/httpx/python-dotenv)는 사내
 `pptx-vision-rag` 와 같은 `>=` 하한 방식으로 두었습니다.
 
 > 이 환경에서 `pip install -r requirements.txt` 는 아무것도 바꾸지 않습니다(전부 already satisfied).
 
-버전이 확정됐지만 방어 코드는 그대로 둡니다 — 인터럽트 감지는 `StateSnapshot.interrupts` 를
-먼저 보고 없으면 `tasks[].interrupts` 로 폴백하므로, 나중에 사내가 구버전으로 내려가도 동작합니다.
+턴 기반 전환으로 인터럽트 감지 코드는 사라졌고, HITL 대기 판정은 순수 상태 조회
+(`aget_state().values["action"]["awaiting"]`)라 버전 변화에 둔감합니다.

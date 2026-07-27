@@ -19,16 +19,15 @@
 (RFC 7464 JSON Text Sequences 와 같은 방식)
 
 
-HITL 판정
----------
-같은 엔드포인트가 신규 질문과 HITL 답변을 모두 받는다.
-서버가 체크포인터 상태를 보고 어느 쪽인지 정한다.
+HITL 판정 (턴 기반 — interrupt 없음)
+------------------------------------
+모든 입력은 **항상 새 턴**이다. HITL 답변도 예외 없이
+{"messages": [HumanMessage(query)]} 로 들어가 Router → Supervisor 를 타고,
+진행 중 액션이 있으면 Supervisor 가 ActionAgent 로 보낸다.
+("모든 사용자 입력은 Router/Supervisor 를 경유한다"는 불변식)
 
-    인터럽트 없음 -> {"messages": [HumanMessage(query)]} 로 새 턴
-    인터럽트 있음 -> Command(resume=query) 로 재개
-
-인터럽트는 이벤트로 안 오기 때문에, astream_events 루프가 끝난 뒤
-aget_state() 를 다시 봐서 판정한다. 이게 정석이다.
+HITL 대기 여부는 스트림이 끝난 뒤 aget_state() 로 action.awaiting 을
+확인해서 판정한다. awaiting 이 있으면 needs_input 프레임을 내보낸다.
 """
 import asyncio
 import json
@@ -41,7 +40,6 @@ from typing import Any, AsyncGenerator, Dict
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
-from langgraph.types import Command
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -181,34 +179,15 @@ def _write_turn_log(thread_id: str, reason: str, model_name: str = None):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 상태 / 인터럽트 유틸
+# 상태 유틸
 # ─────────────────────────────────────────────────────────────────────────
 
-def _collect_interrupts(snap) -> list:
-    """버전 관용적 인터럽트 수집.
-
-    langgraph 0.3+ 는 StateSnapshot.interrupts 를 주고,
-    구버전은 tasks[].interrupts 에만 있다. 둘 다 본다.
-    """
+def _awaiting_of(snap) -> dict | None:
+    """스냅샷에서 HITL 대기 payload(action.awaiting)를 꺼낸다. 없으면 None."""
     if snap is None:
-        return []
-
-    found = list(getattr(snap, "interrupts", None) or [])
-    if found:
-        return found
-
-    for task in (getattr(snap, "tasks", None) or []):
-        found.extend(list(getattr(task, "interrupts", None) or []))
-
-    return found
-
-
-def _interrupt_payload(intr) -> dict:
-    """Interrupt 객체에서 우리가 실어 보낸 dict 를 꺼낸다."""
-    val = getattr(intr, "value", intr)
-    if isinstance(val, dict):
-        return val
-    return {"type": "collect_param", "prompt": str(val)}
+        return None
+    sc = (getattr(snap, "values", None) or {}).get("action") or {}
+    return sc.get("awaiting") or None
 
 
 def _node_of(event: dict) -> str:
@@ -253,26 +232,28 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
         "recursion_limit": req.recursion_limit,
     }
 
-    # --- 신규 턴인가, HITL 재개인가 (체크포인터 상태가 판정한다)
+    # --- HITL 대기 중이었는지 (토큰 원장의 라운드 집계용 — 입력 경로는 동일하다)
     snap = await team_graph.aget_state(config)
-    pending = _collect_interrupts(snap)
-    resuming = bool(pending)
+    awaiting_before = _awaiting_of(snap)
+    resuming = bool(awaiting_before)
 
     usage_store.begin_turn(thread_id, req.query, resuming)
     if not resuming:
         usage_store.set_input_tokens(thread_id, _estimate_tokens(req.query))
 
+    # 신규 질문이든 HITL 답변이든 **똑같이 새 턴**이다.
+    # Router 가 진행 중 액션을 보고 Supervisor 로 고정하고, Supervisor 가
+    # ActionAgent 로 보낸다 — 모든 입력이 Router/Supervisor 를 경유한다.
+    inputs = {
+        "messages": [HumanMessage(content=req.query)],
+        "model_name": effective_model_name,
+    }
     if resuming:
-        kind = _interrupt_payload(pending[0]).get("type", "collect_param")
-        inputs = Command(resume=req.query)
-        print(f"[STREAM] thread={thread_id} RESUME({kind}) <- {req.query!r}", flush=True)
+        kind = awaiting_before.get("type", "collect_param")
+        print(f"[STREAM] thread={thread_id} HITL 답변({kind}) <- {req.query!r}", flush=True)
         yield _event({"type": "agent_status", "agent": "HITL",
-                      "detail": f"사용자 응답 수신({kind}) — 실행 재개"})
+                      "detail": f"사용자 응답 수신({kind}) — Router/Supervisor 경유 재개"})
     else:
-        inputs = {
-            "messages": [HumanMessage(content=req.query)],
-            "model_name": effective_model_name,
-        }
         print(f"[STREAM] thread={thread_id} NEW TURN <- {req.query!r}", flush=True)
 
     # --- 스트리밍 상태 변수
@@ -386,27 +367,18 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
         _write_turn_log(thread_id, "stopped", effective_model_name)
         return
 
-    # --- 인터럽트 감지는 이벤트가 아니라 스트림 종료 후 상태 검사로
-    pending = _collect_interrupts(snap)
-    if pending:
-        payload = _interrupt_payload(pending[0])
+    # --- HITL 대기 감지: 스트림 종료 후 action.awaiting 확인
+    payload = _awaiting_of(snap)
+    if payload:
         usage_store.mark_paused(thread_id)
+        print(f"[STREAM] thread={thread_id} ⏸ HITL 대기: {payload.get('type')}", flush=True)
 
-        checkpoint_id = None
-        try:
-            checkpoint_id = (snap.config or {}).get("configurable", {}).get("checkpoint_id")
-        except Exception:
-            pass
-
-        print(f"[STREAM] thread={thread_id} ⏸ interrupt: {payload.get('type')}", flush=True)
-
-        # 인터럽트 payload 의 'type'(collect_param/confirm)은 프레임의 'type' 과
+        # payload 의 'type'(collect_param/confirm)은 프레임의 'type' 과
         # 충돌하므로 'kind' 로 옮겨 싣는다.
         body = {k: v for k, v in payload.items() if k != "type"}
         yield _event({
             "type": "needs_input",
             "kind": payload.get("type"),
-            "resume_token": checkpoint_id,
             "step_history": step_history,
             **body,
         })
@@ -453,36 +425,27 @@ async def chat_stop(req: StopRequest, request: Request):
     실행 중
         중단 플래그를 세워 스트림 루프를 다음 이벤트에서 탈출시킨다.
 
-    인터럽트 대기 중
-        사실 '실행 중'이 아니라 멈춰 있는 상태다. 그냥 두면 인터럽트가 남아
-        다음 질문이 "답변"으로 오인되므로, abort 센티널로 재개해
-        abandon 경로를 태워 깨끗이 정리한다.
+    HITL 대기 중 (진행 중 액션)
+        턴 기반이라 그래프는 이미 멈춰 있고, action 스크래치만 남아 있다.
+        스크래치를 리셋하면 끝 — abort 센티널 재개 같은 곡예가 필요 없다.
+        (체크포인터는 프로세스 공용이라 어느 그래프로 봐도 같은 스레드다)
     """
     thread_id = req.thread_id
     flags = _stop_flags(request)
 
-    # 어느 모델로 돌던 스레드인지 모르므로, 캐시된 그래프를 모두 뒤져
-    # 인터럽트가 걸린 쪽을 찾는다.
-    for key in (cached_models() or ["default"]):
-        model_name = None if key == "default" else key
-        graph, _ = await get_team_graph(model_name=model_name)
-        config = {"configurable": {"thread_id": thread_id, "model_name": model_name}}
+    graph, _ = await get_team_graph(None)
+    config = {"configurable": {"thread_id": thread_id}}
 
-        snap = await graph.aget_state(config)
-        pending = _collect_interrupts(snap)
+    snap = await graph.aget_state(config)
+    sc = (getattr(snap, "values", None) or {}).get("action") or {}
 
-        if pending:
-            print(f"[STOP] thread={thread_id} interrupt 대기 중 -> abort 센티널로 정리",
-                  flush=True)
-            try:
-                await graph.ainvoke(Command(resume={"aborted": True}), config)
-            except Exception as e:
-                print(f"[STOP] abort 재개 실패: {e}", flush=True)
+    if sc.get("awaiting") or sc.get("phase"):
+        print(f"[STOP] thread={thread_id} 진행 중 액션 -> 스크래치 리셋", flush=True)
+        await graph.aupdate_state(config, {"action": {}})
+        _write_turn_log(thread_id, "aborted", None)
+        return {"ok": True, "mode": "aborted_action", "thread_id": thread_id}
 
-            _write_turn_log(thread_id, "aborted", model_name)
-            return {"ok": True, "mode": "aborted_interrupt", "thread_id": thread_id}
-
-    # 인터럽트가 없으면 실행 중이거나 이미 끝난 스레드다
+    # 진행 중 액션이 없으면 실행 중이거나 이미 끝난 스레드다
     flags[thread_id] = True
     print(f"[STOP] thread={thread_id} 중단 플래그 설정", flush=True)
     return {"ok": True, "mode": "stop_flag", "thread_id": thread_id}

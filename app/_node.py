@@ -187,12 +187,32 @@ def supervisor_node(state: _state.AgentState, config) -> dict:
         emit(config, "agent_status", {"agent": "Supervisor", "detail": "ActionAgent 재진입"})
         return {"next": "ActionAgent", "step": step + 1}
 
+    # 1.5) ActionAgent 가 이번 턴에 사용자에게 질문을 던졌다 -> 턴 종료 (HITL 대기)
+    #      awaiting 이 실려 있고, 그 질문 메시지가 이번 턴에 찍혀 있으면
+    #      더 돌릴 게 없다. FinalAnswer 도 태우지 않고 그대로 끝낸다.
+    #      (사용자의 답변은 다음 턴에 Router -> Supervisor 로 들어온다)
+    if sc.get("awaiting") and member_answered_this_turn(messages, ["ActionAgent"]):
+        print(f"[NODE] Supervisor: HITL 질문 발신({sc['awaiting'].get('type')}) "
+              f"-> 턴 종료, 사용자 응답 대기", flush=True)
+        emit(config, "agent_status",
+             {"agent": "Supervisor", "detail": "사용자 응답 대기 — 턴 종료"})
+        return {"next": "END", "step": step + 1}
+
     # 2) 진행 중인 액션이 있으면 계속 ActionAgent
+    #    (awaiting 상태에서 새 사용자 발화가 들어온 경우도 여기로 온다 —
+    #     Router 가 진행 중 액션을 보고 Supervisor 로 고정해 준다)
     if sc.get("phase") in ("param_check", "collecting", "validating", "confirming"):
         print("[NODE] Supervisor: 진행 중 액션 -> ActionAgent", flush=True)
         return {"next": "ActionAgent", "step": step + 1}
 
-    # 3) ExtractAgent 선행 실행
+    # 3) 이번 턴에 워커가 이미 답을 냈으면 곧장 마무리
+    #    (예: HITL 답변 턴에서 ActionAgent 가 finalize/abandon 을 낸 직후 —
+    #     이때 Extract 선행을 태우는 건 낭비다)
+    if member_answered_this_turn(messages, ANSWERING_MEMBERS):
+        print("[NODE] Supervisor: member 응답 완료 -> FinalAnswerAgent", flush=True)
+        return {"next": "FinalAnswerAgent", "step": step + 1}
+
+    # 3-a) ExtractAgent 선행 실행
     #    사용자 질의가 들어오면 항상 Supervisor 부터 다시 시작하고,
     #    Supervisor 는 그 턴에 Extract 가 안 돌았으면 무조건 먼저 태운다.
     #    -> 뒤에 오는 워커들은 추출된 ID 를 재료로 쓸 수 있다.
@@ -209,12 +229,6 @@ def supervisor_node(state: _state.AgentState, config) -> dict:
         print("[NODE] Supervisor: Extract 게이트 실패 -> FinalAnswerAgent", flush=True)
         emit(config, "agent_status",
              {"agent": "Supervisor", "detail": "추출 결과 없음 -> 바로 응답"})
-        return {"next": "FinalAnswerAgent", "step": step + 1}
-
-    # 4) 이번 턴에 워커가 이미 답을 냈으면 마무리
-    #    (ExtractAgent 는 답변 워커가 아니라 여기서 제외된다)
-    if member_answered_this_turn(messages, ANSWERING_MEMBERS):
-        print("[NODE] Supervisor: member 응답 완료 -> FinalAnswerAgent", flush=True)
         return {"next": "FinalAnswerAgent", "step": step + 1}
 
     # 5) 스텝 상한 가드

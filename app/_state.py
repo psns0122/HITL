@@ -49,7 +49,12 @@ class ActionScratch(TypedDict, total=False):
     params: dict               # 수집·추출된 파라미터 {carrier_id, eqp_id}
     missing: list              # 아직 비어있는 필수 파라미터
     pending_field: str         # 지금 사용자에게 묻고 있는 파라미터
-    pending_answer: object     # interrupt resume 로 받은 원본 답변
+    pending_answer: object     # 새 턴으로 들어온 HITL 답변 (entry 가 적재)
+    awaiting: dict             # 사용자에게 던져 둔 질문 payload (턴 기반 HITL)
+                               #   {type: collect_param|confirm, prompt, field?,
+                               #    action, params, missing?/options?}
+                               #   이게 있으면 '응답 대기 중' — API 가 needs_input
+                               #   프레임으로 변환한다. interrupt 는 쓰지 않는다.
     consult_text: str          # 값이 간접적으로 실린 것으로 보이는 답변 원문
     needs: dict                # Supervisor 상담 요청
                                #   {fill, question, answer, params[, dispatched_to]}
