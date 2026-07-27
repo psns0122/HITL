@@ -140,10 +140,11 @@ def parse_intent(text: str) -> IntentResult:
     return r
 
 
-def classify_collect_answer(fieldname: str, answer, current_action: str | None) -> dict:
-    """수집(collect_param) 답변이 무엇인지 판정한다.
+def resolve_param_answer(fieldname: str, answer, current_action: str | None) -> dict:
+    """수집(collect_param) 답변이 무엇인지 해석한다.
 
-    (구 이름 resolve_param_answer — 이름이 모호해서 바꿈)
+    HITL 파라미터 질문에 사용자가 답한 내용을 아래 종류 중 하나로 분류해,
+    ActionAgent 그래프가 다음 행동을 정하게 한다.
 
     판정 우선순위
       1) cancel   : 그만/취소  -> 액션 종료
@@ -192,5 +193,5 @@ def classify_collect_answer(fieldname: str, answer, current_action: str | None) 
     return {"kind": "value", "text": text}
 
 
-# 구 이름 호환 별칭
-resolve_param_answer = classify_collect_answer
+# 호환 별칭 (혹시 새 이름을 참조하는 코드가 있어도 안 깨지게)
+classify_collect_answer = resolve_param_answer

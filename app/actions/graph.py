@@ -195,7 +195,7 @@ def merge_param_node(state: AgentState, config) -> dict:
     fieldname = sc.get("pending_field")
     _log("merge_param", f"enter field={fieldname}")
 
-    r = resolvers.classify_collect_answer(fieldname, answer, sc.get("action"))
+    r = resolvers.resolve_param_answer(fieldname, answer, sc.get("action"))
 
     # 취소
     if r["kind"] == "cancel":
