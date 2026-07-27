@@ -291,7 +291,7 @@ def send(query: str):
                     line = f"{NODE_ICON} **{ev['agent']}**"
                     trace.append(line)
                     status.write(line)
-                    status.update(label=f"{ev['agent']} 실행 중…")
+                    status.update(label=f"{ev['agent']} 실행 중…", expanded=True)
 
                 elif t == "tool_call":
                     # 툴은 아이콘 없이 `- tool(입력) → 결과` 형태로. 입력과 결과를 항상 보여준다(항목 10).
@@ -333,11 +333,11 @@ def send(query: str):
 
         # HITL 로 멈춘 경우: 질문을 답변 버블에 띄운다
         if needs:
-            status.update(label="사용자 입력 대기 ⏸", state="complete")
+            status.update(label="사용자 입력 대기 ⏸", state="complete", expanded=True)
             answer = needs.get("prompt", "추가 입력이 필요합니다.")
             answer_box.markdown(answer)
         else:
-            status.update(label="완료", state="complete")
+            status.update(label="완료", state="complete", expanded=True)
 
         render_usage(usage)
 
