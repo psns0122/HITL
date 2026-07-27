@@ -69,5 +69,9 @@ class AgentState(TypedDict):
     handoff: bool
     next: str
     step: int
+
+    # 프론트에서 고른 모델명. None 이면 .env 기본 모델을 쓴다.
+    model_name: str
+
     action: ActionScratch                    # 교체(last-write-wins)
     facts: Annotated[dict, merge_dict]       # 병합

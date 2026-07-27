@@ -15,11 +15,16 @@
 # -- graph / LLM ----------------------------------------------------------
 # Pinned exactly. LangGraph's interrupt()/Command/StateSnapshot.interrupts
 # API differs across versions, so bumping these can break HITL resume.
-# (langgraph-checkpoint 4.1.1 / langgraph-prebuilt 1.0.13 are pulled in
-#  transitively and confirmed to resolve correctly.)
 langgraph==1.1.2
 langchain-core==1.4.9
 pydantic==2.12.5
+
+# IMPORTANT: langgraph 1.1.2 allows langgraph-prebuilt >=1.0.8,<1.1.0, but
+# 1.0.9 and newer import ExecutionInfo/ServerInfo from langgraph.runtime,
+# which langgraph 1.1.2 does not export. Importing create_react_agent then
+# fails with ImportError. 1.0.8 is the newest version that works with
+# langgraph 1.1.2, so it is pinned here rather than left to the resolver.
+langgraph-prebuilt==1.0.8
 
 # Used to call the in-house OpenAI-compatible LLM gateway.
 # Pinned to the version that matches langchain-core 1.4.9.

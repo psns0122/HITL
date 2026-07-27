@@ -17,7 +17,7 @@ pip install -r requirements.txt
 cp .env.example .env          # FAKE_LLM=1 이면 LLM 없이도 전부 동작합니다
 
 # 터미널 1 — API 서버
-uvicorn app.main:app --reload --port 8000
+uvicorn app.api.main:app --reload --port 8000
 # 터미널 2 — 채팅 UI
 streamlit run streamlit_app.py
 ```
@@ -32,6 +32,9 @@ python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실
 
 > 셋 다 `FAKE_LLM=1` 로 돌아가므로 사내 LLM endpoint 없이 검증됩니다.
 > `FAKE_LLM=0`(실제 LLM) 경로는 사내에서 한 번 확인해 주세요.
+
+모델은 **프론트에서 고릅니다** (사이드바 드롭다운). 고른 모델명이 요청에 실려 오고,
+서버는 그 모델명을 키로 그래프를 캐싱합니다.
 
 데모 노트북: `notebooks/hitl_demo.ipynb` (셀을 위에서부터 실행)
 
@@ -126,9 +129,23 @@ python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실
 
 ### `POST /llm/api/chat/stream`
 
+요청 본문 (`ChatRequest`):
+
 ```json
-{ "query": "6PDMQ283 반송해줘", "thread_id": "chat-001" }
+{
+  "query": "6PDMQ283 반송해줘",
+  "thread_id": "chat-001",
+  "model_name": "GaiA-LLM-Latest",
+  "recursion_limit": 20
+}
 ```
+
+| 필드 | 기본값 | 설명 |
+|---|---|---|
+| `query` | (필수) | 사용자 입력. HITL 대기 중이면 그 질문에 대한 답변으로 해석됩니다. |
+| `thread_id` | (필수) | 채팅 세션 식별자. 세션당 하나를 유지해야 맥락이 이어집니다. |
+| `model_name` | `null` | 프론트에서 고른 모델. `null` 이면 `.env` 기본 모델. |
+| `recursion_limit` | `20` | LangGraph recursion limit (`ge=1`, `le=200`). |
 
 **같은 엔드포인트가 신규 질문과 HITL 답변을 모두 처리합니다.** 서버가 체크포인터 상태를 보고
 판정합니다.
@@ -136,15 +153,29 @@ python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실
 - 인터럽트 없음 → `{"messages": [HumanMessage(query)]}` 로 신규 턴
 - 인터럽트 있음 → `Command(resume=query)` 로 재개
 
-SSE 이벤트 (`data:` 한 줄에 JSON, 종류는 `type` 필드로 구분):
+#### 스트림 포맷
+
+최종 답변 토큰은 **가공 없는 raw text** 로 그대로 흘립니다(사내 현행 방식).
+제어 정보만 텍스트와 섞이지 않게 **`\x1e`(RS) 로 시작하는 JSON 한 줄**로 보냅니다.
+
+```
+✅ 반송요청명령 실행 완료          <- 그냥 텍스트 (화면에 그대로)
+\x1e{"type":"needs_input",...}\n   <- 제어 프레임
+```
+
+`\x1e` 는 일반 텍스트에 나올 일이 없는 제어문자라 안전하게 갈라낼 수 있습니다
+(RFC 7464 JSON Text Sequences 와 같은 방식). 클라이언트 구현은 `streamlit_app.py`
+의 `stream_chat()` 를 그대로 가져다 쓰면 됩니다.
+
+제어 프레임 종류:
 
 | `type` | 언제 | 내용 |
 |---|---|---|
-| `token` | FinalAnswerAgent/FinalGeneralAgent 토큰 | `{agent, text}` — 화면에 흐르는 최종 답변 |
 | `node_enter` | 그래프 노드 진입 | `{agent, node}` — 트레이스 창 |
 | `tool_call` | 툴 호출 | `{agent, tool, args, result?}` |
 | `agent_status` | 에이전트 상태 한 줄 | `{agent, detail}` |
 | `needs_input` | **HITL 로 멈춤** | `{kind: collect_param\|confirm, prompt, field?, action, params, options?, resume_token}` |
+| `thinking` | 중간 에이전트 토큰 (기본 off) | `{agent, text}` — `SHOW_THINKING_TOKENS=1` 일 때만 |
 | `usage` | 턴 종료 | 토큰/시간 집계 |
 | `done` | 종료 | `{reason: complete\|interrupted\|stopped\|error}` |
 | `error` | 오류 | `{message}` |
@@ -158,10 +189,45 @@ SSE 이벤트 (`data:` 한 줄에 JSON, 종류는 `type` 필드로 구분):
 { "thread_id": "chat-001" }
 ```
 
-- **실행 중**: 중단 플래그를 세워 스트림 루프를 탈출시킵니다.
+- **실행 중**: `app.state.stop_flags[thread_id]` 를 세워 스트림 루프를 다음 이벤트에서
+  탈출시킵니다.
 - **인터럽트 대기 중**: 사실 실행 중이 아니라 멈춰 있는 상태입니다. 그냥 두면 인터럽트가 남아
   다음 질문이 "답변"으로 오인되므로, abort 센티널(`Command(resume={"aborted": True})`)로
   재개해 `abandon` 경로를 태워 깨끗이 정리합니다.
+
+### `GET /llm/api/models`
+
+프론트 드롭다운용 모델 목록. 게이트웨이 `/models` 와 같은 형태입니다.
+
+```json
+{
+  "object": "list",
+  "data": [
+    {"id": "GaiA-LLM-Latest",       "object": "model", "owned_by": "in-house", "is_default": true},
+    {"id": "gaia-GLM-5.2",          "object": "model", "owned_by": "in-house", "is_default": false},
+    {"id": "Qwen3.5-397B-A17B-FP8", "object": "model", "owned_by": "in-house", "is_default": false}
+  ]
+}
+```
+
+목록은 `app/_llm.py` 의 `AVAILABLE_MODELS` 에 하드코딩되어 있습니다.
+게이트웨이에서 직접 받아오려면 `list_models()` 본문만 바꾸면 됩니다.
+
+### 모델별 그래프 캐싱
+
+LangGraph 빌드는 무거워서 매 요청마다 만들 수 없고, 하나만 만들어 두면 모델 변경이
+반영되지 않습니다. 그래서 `app/api/graph_service.py` 가 **모델명을 키로** 캐싱합니다.
+
+```python
+_dynamic_graph_cache: Dict[str, dict] = {}   # model_name -> {graph, checkpointer}
+_lock = asyncio.Lock()
+
+async def get_team_graph(model_name=None):
+    cache_key = model_name if model_name else "default"
+    ...
+```
+
+체크포인터도 그래프와 짝으로 같이 캐싱합니다 (HITL 재개가 체크포인터에 붙어 있으므로).
 
 ---
 
@@ -214,6 +280,7 @@ class AgentState(TypedDict):
     handoff: bool
     next: str
     step: int
+    model_name: str                          # 프론트에서 고른 모델
     action: ActionScratch                    # 교체(last-write-wins) — limiter 영향 없음
     facts: Annotated[dict, merge_dict]       # 에이전트 간 공유 팩트
 ```
@@ -268,13 +335,15 @@ Streamlit 이 이를 `st.status` 에 흘려서 "Supervisor 판단 중… / Locat
 ```
 app/
 ├── config.py            # .env 로드
-├── _state.py            # AgentState + 4턴 limiter + ActionScratch
-├── _llm.py              # LLM 팩토리 (OpenAI 호환 endpoint / FAKE_LLM 목업)
-├── _agent.py            # router/supervisor/final 등 에이전트
-├── _node.py             # 노드들 + Supervisor 의 needs 라우팅
-├── _util.py             # emit(SSE 커스텀 이벤트) 등
+├── _state.py            # AgentState + 4턴 limiter + ActionScratch + model_name
+├── _prompt.py           # 에이전트 프롬프트 모음 ← 사내 문구로 갈아끼우는 지점
+├── _tool.py             # 에이전트별 툴 (목업)
+├── _llm.py              # LLM 팩토리 + 모델 목록 (list_models)
+├── _agent.py            # disable_tool_caching / classify_route_with_llm / create_*_agent
+├── _node.py             # 노드들 + Supervisor 배분(ExtractAgent 선행, needs 라우팅)
+├── _util.py             # message_content_to_text / normalize_route_label / extract_json_object
+├── _mcp.py              # MCP 커넥션 매니저 (lifespan 훅, 스텁)
 ├── _builder.py          # build_team_graph — 기존 배선 + ActionAgent 삽입
-├── main.py              # FastAPI 엔트리
 ├── actions/             # ★ ActionAgent 도메인
 │   ├── mock_db.py       #   목업 DB + 공유 조회 함수(LocationAgent 도 재사용)
 │   ├── registry.py      #   ActionSpec + ACTION_REGISTRY ← 액션 추가 지점
@@ -282,12 +351,50 @@ app/
 │   ├── tools.py         #   param_check / validate / confirm / execute
 │   └── graph.py         #   HITL 서브그래프
 └── api/
-    ├── routes.py        # /chat/stream, /chat/stop, 일별 jsonl 로그
-    ├── sse.py           # SSE 직렬화
+    ├── main.py          # FastAPI 엔트리 (lifespan: MCP connect/disconnect)
+    ├── routes.py        # /chat/stream, /chat/stop, /models, 일별 jsonl 로그
     ├── usage_store.py   # thread_id 별 토큰/시간 원장
-    ├── graph_service.py # 그래프 빌드 캐시
-    └── schemas.py
+    ├── graph_service.py # 모델명 키 그래프 캐시
+    └── schemas.py       # ChatRequest / ChatResponse / StopRequest
 ```
+
+### 에이전트별 툴
+
+에이전트 코드는 전부 같은 모양이고 **붙는 툴만 다릅니다** (`app/_agent.py`).
+
+| 에이전트 | 툴 |
+|---|---|
+| GeneralAgent | `general_tool`, `amhs_rag_tool` |
+| StatusAgent | `queue_status_tool`, `server_status_tool`, `sysadmin_tool`, `patch_plan_search_tool`, `eqp_search_tool` |
+| LocationAgent | `location_search_tool` |
+| LogAgent | `log_search_tool` |
+| ExtractAgent | `fab_extract_tool`, `params_extract_tool` |
+| ActionAgent | (HITL 서브그래프가 직접 호출 — `actions/tools.py`) |
+
+모든 툴은 `disable_tool_caching()` 을 거칩니다. 설비/캐리어 상태는 계속 바뀌므로
+같은 질문이라도 매번 실제 DB 를 봐야 하기 때문입니다.
+
+### ExtractAgent 는 왜 항상 먼저 도는가
+
+ExtractAgent 는 답변을 내는 워커가 아니라 **뒤 단계가 쓸 ID 재료를 만드는 선행 단계**입니다.
+그래서 Supervisor 가 그 턴에 Extract 가 아직 안 돌았으면 무조건 먼저 태웁니다.
+
+```
+[NODE] Router entered
+[NODE] Supervisor entered
+[NODE] Supervisor: ExtractAgent 선행 실행     ← 항상 여기부터
+[NODE] ExtractAgent entered
+[NODE] Supervisor entered
+[NODE] Supervisor -> LocationAgent
+...
+```
+
+> **"사용자 질의하면 다시 Supervisor 부터 시작하는 게 이상한가?"** — 이상하지 않습니다.
+> 워커는 실행 후 항상 Supervisor 로 복귀하는 구조라, 매 턴 Supervisor 가 다시 판단하는 게
+> 원래 정상 동작입니다. Extract 선행은 그 위에 얹은 결정적 규칙 하나일 뿐입니다.
+>
+> 다만 `member_answered_this_turn()` 판정에서는 ExtractAgent 를 **빼야** 합니다
+> (`ANSWERING_MEMBERS`). 안 빼면 Extract 가 돌자마자 "워커가 답했다"고 보고 턴이 끝나버립니다.
 
 ### 액션 추가하기
 
@@ -362,8 +469,15 @@ ACTION_REGISTRY["hold_carrier"] = ActionSpec(
 | `langchain-core` | 1.4.9 | 1.4.9 ✅ |
 | `langchain-openai` | 1.1.8 | 1.1.8 ✅ |
 | `pydantic` | 2.12.5 | 2.12.5 ✅ |
+| `langgraph-prebuilt` | — | **1.0.8 필수** ⚠️ |
 
-`requirements.txt` 는 위 4개를 **정확히 고정(`==`)** 합니다. LangGraph 는
+> ⚠️ **`langgraph-prebuilt` 주의.** langgraph 1.1.2 는 `>=1.0.8,<1.1.0` 을 허용하지만,
+> 1.0.9 이상은 `langgraph.runtime` 에서 `ExecutionInfo`/`ServerInfo` 를 import 하는데
+> langgraph 1.1.2 에는 그게 없습니다. 그대로 두면 `create_react_agent` import 가
+> `ImportError` 로 죽습니다. 그래서 **1.0.8 로 고정**했습니다.
+> 사내에서 이미 1.0.9+ 가 깔려 있다면 `pip install langgraph-prebuilt==1.0.8` 로 내려야 합니다.
+
+`requirements.txt` 는 위 버전들을 **정확히 고정(`==`)** 합니다. LangGraph 는
 `interrupt()`/`Command`/`StateSnapshot.interrupts` API 가 버전마다 달라, 올리면 HITL 재개가
 깨질 수 있어서입니다. 나머지(fastapi/uvicorn/streamlit/httpx/python-dotenv)는 사내
 `pptx-vision-rag` 와 같은 `>=` 하한 방식으로 두었습니다.

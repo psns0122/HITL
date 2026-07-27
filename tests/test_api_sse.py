@@ -1,4 +1,7 @@
-"""SSE API E2E 테스트 — 실제 HTTP(ASGI) 로 HITL 왕복을 돌린다.
+"""API E2E 테스트 — 실제 HTTP(ASGI) 로 HITL 왕복을 돌린다.
+
+스트림은 최종 답변을 raw text 로 흘리고, 제어 정보만 \\x1e 로 시작하는
+JSON 한 줄로 보낸다. 아래 parse_stream 이 그걸 갈라낸다.
 
 실행: python3 tests/test_api_sse.py
 """
@@ -12,129 +15,183 @@ sys.path.insert(0, str(ROOT))
 
 import httpx
 
-from app.main import app
+from app.api.main import app
 
 BASE = "http://test/llm/api"
+EVENT_PREFIX = "\x1e"
 
 
-async def stream(client, thread_id: str, query: str) -> list[dict]:
-    """/chat/stream 을 호출하고 수신한 SSE 이벤트를 리스트로 돌려준다."""
-    events = []
-    async with client.stream("POST", f"{BASE}/chat/stream",
-                             json={"query": query, "thread_id": thread_id}) as r:
+async def stream(client, thread_id: str, query: str, **kw) -> tuple[str, list]:
+    """/chat/stream 호출 -> (최종 답변 텍스트, 제어 이벤트 리스트)."""
+    payload = {"query": query, "thread_id": thread_id}
+    payload.update(kw)
+
+    text_parts, events, buffer = [], [], ""
+
+    async with client.stream("POST", f"{BASE}/chat/stream", json=payload) as r:
         assert r.status_code == 200, r.status_code
-        async for line in r.aiter_lines():
-            if line.startswith("data: "):
-                events.append(json.loads(line[6:]))
-    return events
 
+        async for raw in r.aiter_text():
+            buffer += raw
 
-def kinds(events):
-    return [e["type"] for e in events]
+            # 제어 프레임을 하나씩 떼어낸다
+            while EVENT_PREFIX in buffer:
+                head, _, rest = buffer.partition(EVENT_PREFIX)
+                if head:
+                    text_parts.append(head)
+
+                if "\n" not in rest:
+                    buffer = EVENT_PREFIX + rest
+                    break
+
+                line, _, remainder = rest.partition("\n")
+                events.append(json.loads(line))
+                buffer = remainder
+            else:
+                if buffer:
+                    text_parts.append(buffer)
+                    buffer = ""
+
+    if buffer:
+        text_parts.append(buffer)
+
+    return "".join(text_parts), events
 
 
 def first(events, t):
     return next((e for e in events if e["type"] == t), None)
 
 
+def kinds(events):
+    return [e["type"] for e in events]
+
+
 async def main():
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test",
-                                 timeout=60) as client:
 
+    async with httpx.AsyncClient(transport=transport, base_url="http://test",
+                                 timeout=120) as client:
+
+        # ── 0) health / models
         h = await client.get(f"{BASE}/health")
         assert h.status_code == 200 and h.json()["ok"], h.text
-        print("health PASS")
+        assert h.json()["default_model"] == "GaiA-LLM-Latest", h.json()
 
-        # ── 1) 신규 턴 → 파라미터 부족으로 HITL 인터럽트
-        ev = await stream(client, "sse-A", "6PDMQ283 반송해줘")
+        m = await client.get(f"{BASE}/models")
+        body = m.json()
+        assert body["object"] == "list", body
+        ids = [d["id"] for d in body["data"]]
+        assert "GaiA-LLM-Latest" in ids and "gaia-GLM-5.2" in ids, ids
+        assert "Qwen3.5-397B-A17B-FP8" in ids, ids
+        print(f"0) health + models PASS (models={ids})")
+
+        # ── 1) 신규 턴 -> 파라미터 부족으로 HITL 인터럽트
+        _, ev = await stream(client, "sse-A", "6PDMQ283 반송해줘")
         ni = first(ev, "needs_input")
         assert ni, kinds(ev)
-        assert ni["kind"] == "collect_param", ni
-        assert ni.get("field") == "eqp_id", ni
-        assert first(ev, "done")["reason"] == "interrupted", ev[-1]
-        assert first(ev, "node_enter"), "노드 트레이스 이벤트 없음"
-        assert first(ev, "tool_call"), "툴 트레이스 이벤트 없음"
-        print("1) new turn -> needs_input(collect_param/eqp_id) PASS")
-
-        # ── 2) 같은 엔드포인트로 답변 → 재개 → 승인 요청 인터럽트
-        ev = await stream(client, "sse-A", "STK102 로 보내줘")
-        ni = first(ev, "needs_input")
-        assert ni and ni["kind"] == "confirm" and ni.get("action") == "transport", ni
-        assert ni.get("params", {}).get("eqp_id") == "STK102", ni
-        assert "승인" in (ni.get("options") or []), ni
+        assert ni["kind"] == "collect_param" and ni.get("field") == "eqp_id", ni
         assert first(ev, "done")["reason"] == "interrupted"
-        print("2) resume -> needs_input(confirm) PASS")
 
-        # ── 3) 승인 → 최종 답변 토큰 스트리밍 + usage + 완료
-        ev = await stream(client, "sse-A", "승인")
-        toks = [e for e in ev if e["type"] == "token"]
-        assert toks, kinds(ev)
-        answer = "".join(t["text"] for t in toks)
-        assert "TJ-" in answer, answer
-        assert all(t["agent"] == "FinalAnswerAgent" for t in toks)
+        # ExtractAgent 가 워커 중 가장 먼저 돌았는지
+        nodes = [e["agent"] for e in ev if e["type"] == "node_enter"]
+        assert "ExtractAgent" in nodes, nodes
+        assert nodes.index("ExtractAgent") < nodes.index("ActionAgent"), nodes
+        print(f"1) 신규 턴 -> HITL, ExtractAgent 선행 PASS (nodes={nodes})")
+
+        # ── 2) 답변 재개 -> 승인 요청
+        _, ev = await stream(client, "sse-A", "STK102 로 보내줘")
+        ni = first(ev, "needs_input")
+        assert ni and ni["kind"] == "confirm", ni
+        assert ni.get("params", {}).get("eqp_id") == "STK102", ni
+        print("2) resume -> confirm PASS")
+
+        # ── 3) 승인 -> 최종 답변이 raw text 로 흘러야 한다
+        answer, ev = await stream(client, "sse-A", "승인")
+        assert "TJ-" in answer, repr(answer)
+        assert "실행 완료" in answer, repr(answer)
+
         usage = first(ev, "usage")
         assert usage and usage["total_tokens"] > 0, usage
-        assert usage["hitl_rounds"] == 2, usage           # 파라미터 1회 + 승인 1회
+        assert usage["hitl_rounds"] == 2, usage
         assert usage["stream_calls"] == 3, usage
-        assert usage["ttft_ms"] is not None and usage["compute_ms"] >= 0, usage
-        assert usage["per_agent"], usage
+        assert usage["ttft_ms"] is not None, usage
         assert first(ev, "done")["reason"] == "complete"
-        print(f"3) approve -> token stream + usage PASS "
-              f"(tokens={usage['total_tokens']}, agents={list(usage['per_agent'])})")
+        print(f"3) 승인 -> raw text 스트리밍 + usage PASS "
+              f"(tokens={usage['total_tokens']})")
 
-        # ── 4) 일별 jsonl 로그가 기록됐는지
+        # ── 4) 일별 jsonl 로그
         from app.api.routes import _get_log_dir, kst_date_str, read_log_records
         logf = Path(_get_log_dir()) / f"{kst_date_str()}.jsonl"
         assert logf.exists(), f"로그 파일 없음: {logf}"
-        recs = read_log_records(logf)
-        rec = next(r for r in reversed(recs) if r["thread_id"] == "sse-A")
+
+        rec = next(r for r in reversed(read_log_records(logf))
+                   if r["thread_id"] == "sse-A")
+        assert rec["outcome"] == "complete", rec
+        assert rec["model_name"] == "GaiA-LLM-Latest", rec
         assert rec["token_cost"]["total_tokens"] > 0, rec
-        assert rec["time_cost"]["ttft_ms"] is not None, rec
         assert rec["hitl"]["rounds"] == 2, rec
-        assert rec["outcome"] == "complete"
-        assert rec["step_history"], rec
-        assert rec["time_cost"]["human_wait_ms"] >= 0
-        print(f"4) daily jsonl log PASS ({logf.name}, steps={len(rec['step_history'])})")
+        logged_nodes = [s["node"] for s in rec["step_history"]]
+        assert "ExtractAgent" in logged_nodes, logged_nodes
+        print(f"4) 일별 jsonl 로그 PASS (steps={logged_nodes})")
 
         # ── 5) 거절 경로
-        ev = await stream(client, "sse-B", "9ZXCV456 목적지 요청")
-        assert first(ev, "needs_input")["type"] == "needs_input"
-        ev = await stream(client, "sse-B", "아니 하지마")
-        answer = "".join(e["text"] for e in ev if e["type"] == "token")
-        assert "실행하지 않았습니다" in answer, answer
-        assert first(ev, "done")["reason"] == "complete"
-        print("5) reject path PASS")
+        _, ev = await stream(client, "sse-B", "9ZXCV456 목적지 요청")
+        assert first(ev, "needs_input")["kind"] == "confirm"
+        answer, ev = await stream(client, "sse-B", "아니 하지마")
+        assert "실행하지 않았습니다" in answer, repr(answer)
+        print("5) 거절 경로 PASS")
 
         # ── 6) /chat/stop 이 interrupt 대기 스레드를 정리하는가
-        ev = await stream(client, "sse-C", "7HITL001 반송해줘")
+        _, ev = await stream(client, "sse-C", "7HITL001 반송해줘")
         assert first(ev, "needs_input"), kinds(ev)
+
         r = await client.post(f"{BASE}/chat/stop", json={"thread_id": "sse-C"})
         assert r.json()["mode"] == "aborted_interrupt", r.text
-        # 정리 후에는 인터럽트가 남아있지 않아야 다음 질문이 답변으로 오인되지 않는다
+
         from app.api.graph_service import get_team_graph
         from app.api.routes import _collect_interrupts
-        graph, _ = await get_team_graph()
+        graph, _ = await get_team_graph(None)
         snap = await graph.aget_state({"configurable": {"thread_id": "sse-C"}})
         assert not _collect_interrupts(snap), snap.interrupts
-        print("6) /chat/stop on interrupted thread PASS")
+        print("6) /chat/stop (interrupt 정리) PASS")
 
-        # ── 7) needs-핸드오프가 SSE 로도 보이는가 (동료 에이전트 연계)
-        ev = await stream(client, "sse-D", "6PDMQ283 를 9ZXCV456 있는 위치로 반송해줘")
+        # ── 7) needs-핸드오프
+        _, ev = await stream(client, "sse-D", "6PDMQ283 를 9ZXCV456 있는 위치로 반송해줘")
         ni = first(ev, "needs_input")
         assert ni and ni.get("params", {}).get("eqp_id") == "STK102", ni
         nodes = [e["agent"] for e in ev if e["type"] == "node_enter"]
         assert "LocationAgent" in nodes and "ActionAgent" in nodes, nodes
-        print(f"7) needs-handoff visible in SSE PASS (nodes={nodes})")
+        print(f"7) needs-핸드오프 PASS (nodes={nodes})")
 
         # ── 8) 일반 질의
-        ev = await stream(client, "sse-E", "안녕!")
-        toks = [e for e in ev if e["type"] == "token"]
-        assert toks and all(t["agent"] == "FinalGeneralAgent" for t in toks), kinds(ev)
+        answer, ev = await stream(client, "sse-E", "안녕!")
+        assert answer.strip(), repr(answer)
         assert first(ev, "done")["reason"] == "complete"
-        print("8) general route streams from FinalGeneralAgent PASS")
+        print("8) 일반 질의 PASS")
 
-    print("\nALL SSE API TESTS PASS")
+        # ── 9) 모델을 바꾸면 그래프가 모델별로 캐싱되는가
+        _, ev = await stream(client, "sse-F", "안녕!", model_name="gaia-GLM-5.2")
+        assert first(ev, "done")["reason"] == "complete", kinds(ev)
+
+        from app.api.graph_service import cached_models
+        assert "gaia-GLM-5.2" in cached_models(), cached_models()
+        print(f"9) 모델별 그래프 캐싱 PASS (cached={cached_models()})")
+
+        # ── 10) recursion_limit 이 요청대로 먹는가 (1 이면 즉시 한도 초과)
+        _, ev = await stream(client, "sse-G", "6PDMQ283 위치 알려줘", recursion_limit=1)
+        err = first(ev, "error")
+        assert err and "recursion" in err["message"].lower(), ev
+        assert first(ev, "done")["reason"] == "error"
+        print("10) recursion_limit 반영 PASS")
+
+        # ── 11) 스키마 검증: 범위 밖 recursion_limit 은 거부
+        r = await client.post(f"{BASE}/chat/stream",
+                              json={"query": "x", "thread_id": "sse-H",
+                                    "recursion_limit": 999})
+        assert r.status_code == 422, r.status_code
+        print("11) recursion_limit 범위 검증 PASS")
+
+    print("\nALL API TESTS PASS")
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ import httpx
 import uvicorn
 
 import app.config as cfg
-from app.main import app as fastapi_app
+from app.api.main import app as fastapi_app
 
 
 def _free_port() -> int:
