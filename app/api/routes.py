@@ -34,6 +34,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict
@@ -50,7 +51,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import app.config as cfg
 from app import _llm
 from app._node import members
-from app.api import usage_store
+from app.api import limits, usage_store
 from app.api.graph_service import cached_models, get_team_graph
 from app.api.schemas import ChatRequest, ChatResponse, StopRequest
 
@@ -281,6 +282,26 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
     printed_any = False          # 최종 토큰을 하나라도 내보냈는지
     stopped = False              # 사용자 중단 플래그
 
+    # 동시 실행 슬롯을 잡는다. 넘치면 여기서 순서대로 대기한다(거절 아님).
+    slot_wait_start = time.time()
+    async with limits.concurrency_slot():
+        waited = time.time() - slot_wait_start
+        if waited > 0.5:
+            yield _event({"type": "agent_status", "agent": "system",
+                          "detail": f"대기 후 실행 시작 ({waited:.1f}s 대기)"})
+
+        async for gen_item in _run_graph(team_graph, inputs, config, thread_id,
+                                         stop_flags, step_history):
+            yield gen_item
+
+
+async def _run_graph(team_graph, inputs, config, thread_id, stop_flags, step_history):
+    """세마포어 슬롯을 잡은 상태에서 실제 그래프 스트림을 돈다."""
+    effective_model_name = config["configurable"].get("model_name")
+    last_recorded_node = None
+    printed_any = False
+    stopped = False
+
     try:
         async for ev in team_graph.astream_events(inputs, config, version="v2"):
 
@@ -339,6 +360,13 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
                 usage_store.add_tool_call(thread_id, payload)
                 print(f"[TOOL-EVENT] {payload['tool']} args={payload['args']}", flush=True)
                 yield _event({"type": "tool_call", **payload})
+
+            # --- 툴 결과 (실제 LLM 모드의 ReAct 툴). 입력은 위 start 에서, 결과는 여기서.
+            elif event_type == "on_tool_end":
+                out = (ev.get("data") or {}).get("output")
+                result = getattr(out, "content", out)   # ToolMessage 면 content
+                yield _event({"type": "tool_call", "agent": node,
+                              "tool": ev.get("name"), "result": result})
 
             # --- 노드가 emit() 한 상세 트레이스
             elif event_type == "on_custom_event":
@@ -502,5 +530,7 @@ async def health():
         "fake_llm": cfg.FAKE_LLM,
         "default_model": _llm.default_model_name(),
         "cached_graphs": cached_models(),
+        "concurrency": limits.concurrency_state(),
+        "rate_limit_per_min": cfg.RATE_LIMIT_PER_MIN,
         "time": kst_now_iso(),
     }

@@ -191,6 +191,21 @@ async def main():
         assert r.status_code == 422, r.status_code
         print("11) recursion_limit 범위 검증 PASS")
 
+        # ── 12) 맥락 이탈: 수집 중 다른 명령 -> 재시작
+        _, ev = await stream(client, "sse-K", "6PDMQ283 반송해줘")
+        assert first(ev, "needs_input")["field"] == "eqp_id"
+        _, ev = await stream(client, "sse-K", "9ZXCV456 목적지 요청해줘")
+        ni = first(ev, "needs_input")
+        assert ni and ni["kind"] == "confirm" and ni["action"] == "dest_req", ni
+        assert ni["params"]["carrier_id"] == "9ZXCV456", ni
+        print("12) 맥락 이탈 재시작 PASS")
+
+        # ── 13) 헬스체크에 동시성/유량 정보
+        h = (await client.get(f"{BASE}/health")).json()
+        assert "concurrency" in h and "max_concurrent" in h["concurrency"], h
+        assert "rate_limit_per_min" in h, h
+        print(f"13) concurrency/rate 노출 PASS ({h['concurrency']})")
+
     print("\nALL API TESTS PASS")
 
 

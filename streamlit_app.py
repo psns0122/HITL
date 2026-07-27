@@ -192,28 +192,53 @@ st.caption("Router → Supervisor → ExtractAgent → 워커 → FinalAnswerAge
 # ─────────────────────────────────────────────────────────────────────────
 
 def render_trace(trace: list, expanded: bool = False):
-    """노드/툴 실행 트레이스를 접이식으로."""
+    """노드/툴 실행 트레이스를 접이식으로.
+
+    진입점(node_enter)만 아이콘을 붙이고, 나머지(툴·상태)는 `- ...` 로 통일한다(항목 9).
+    """
     if not trace:
         return
 
-    with st.expander(f"🧠 실행 트레이스 ({len(trace)} step)", expanded=expanded):
+    with st.expander(f"실행 트레이스 ({len(trace)} step)", expanded=expanded):
         for line in trace:
             st.markdown(line)
 
 
+def _fmt_secs(ms) -> str:
+    """ms -> 초 문자열. None 이면 '-'."""
+    if ms is None:
+        return "-"
+    return f"{ms / 1000:.2f}s"
+
+
 def render_usage(u: dict):
-    """토큰/시간 요약 한 줄."""
+    """토큰/시간/HITL 요약을 하단 접이식 카드로 숨긴다(항목 13·14)."""
     if not u:
         return
 
-    st.caption(
-        f"🔢 총 {u.get('total_tokens')} tok "
-        f"(입력 {u.get('user_input_tokens')} / 에이전트 in {u.get('agent_input_tokens')} "
-        f"· out {u.get('agent_output_tokens')})　"
-        f"⏱ 첫 응답 {u.get('ttft_ms')}ms · 총 {u.get('elapsed_ms')}ms "
-        f"(사람대기 {u.get('human_wait_ms')}ms 제외 시 {u.get('compute_ms')}ms)　"
-        f"🙋 HITL {u.get('hitl_rounds')}회"
-    )
+    with st.expander("응답 상세 (토큰 · 시간 · HITL)", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        c1.metric("첫 응답", _fmt_secs(u.get("ttft_ms")))
+        c2.metric("총 시간", _fmt_secs(u.get("elapsed_ms")))
+        c3.metric("HITL", f"{u.get('hitl_rounds', 0)}회")
+
+        st.caption(
+            f"총 토큰 {u.get('total_tokens')} "
+            f"(사용자 입력 {u.get('user_input_tokens')} · "
+            f"에이전트 in {u.get('agent_input_tokens')} / out {u.get('agent_output_tokens')})　"
+            f"연산 시간 {_fmt_secs(u.get('compute_ms'))} "
+            f"(사람 대기 {_fmt_secs(u.get('human_wait_ms'))} 제외)"
+        )
+
+        per_agent = u.get("per_agent") or {}
+        if per_agent:
+            st.caption("에이전트별 토큰")
+            st.table({
+                "에이전트": list(per_agent.keys()),
+                "in": [v.get("input", 0) for v in per_agent.values()],
+                "out": [v.get("output", 0) for v in per_agent.values()],
+                "calls": [v.get("calls", 0) for v in per_agent.values()],
+            })
 
 
 # 지난 대화 렌더
@@ -229,12 +254,8 @@ for turn in st.session_state.history:
 # 전송 처리
 # ─────────────────────────────────────────────────────────────────────────
 
-ICON = {
-    "node_enter": "▶️",
-    "tool_call": "🔧",
-    "agent_status": "💬",
-    "thinking": "🧠",
-}
+# 진입점만 아이콘. 툴/상태는 아이콘 없이 `- ...` 로 통일 (항목 9)
+NODE_ICON = "▶"
 
 
 def send(query: str):
@@ -266,27 +287,32 @@ def send(query: str):
                 t = ev.get("type")
 
                 if t == "node_enter":
-                    line = f"{ICON[t]} **{ev['agent']}** 진입"
+                    # 진입점만 아이콘
+                    line = f"{NODE_ICON} **{ev['agent']}**"
                     trace.append(line)
                     status.write(line)
                     status.update(label=f"{ev['agent']} 실행 중…")
 
                 elif t == "tool_call":
-                    detail = f"{ICON[t]} `{ev.get('tool')}`"
-                    if ev.get("args"):
-                        detail += f" · args={ev['args']}"
-                    if ev.get("result"):
-                        detail += f" → {ev['result']}"
+                    # 툴은 아이콘 없이 `- tool(입력) → 결과` 형태로. 입력과 결과를 항상 보여준다(항목 10).
+                    tool = ev.get("tool")
+                    args = ev.get("args")
+                    result = ev.get("result")
+                    detail = f"- `{tool}`"
+                    if args is not None:
+                        detail += f" 입력: `{args}`"
+                    if result is not None:
+                        detail += f" → 결과: `{result}`"
                     trace.append(detail)
                     status.write(detail)
 
                 elif t == "agent_status":
-                    line = f"{ICON[t]} **{ev.get('agent')}** — {ev.get('detail')}"
+                    line = f"- {ev.get('agent')}: {ev.get('detail')}"
                     trace.append(line)
                     status.write(line)
 
                 elif t == "thinking":
-                    status.write(f"{ICON[t]} {ev.get('agent')}: {ev.get('text')}")
+                    status.write(f"- {ev.get('agent')}: {ev.get('text')}")
 
                 elif t == "needs_input":
                     needs = ev

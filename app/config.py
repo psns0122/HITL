@@ -118,6 +118,10 @@ MAX_COLLECT = _as_int("MAX_COLLECT", 5)       # 파라미터 재질문 상한
 MAX_VALIDATE = _as_int("MAX_VALIDATE", 3)     # 검증 재시도 상한
 MAX_HOPS = _as_int("MAX_HOPS", 3)             # needs-핸드오프 왕복 상한
 
+# ── 유량 / 동시성 제어 ────────────────────────────────────────────────────
+MAX_CONCURRENT = _as_int("MAX_CONCURRENT", 4)        # 동시에 도는 스트림 수 상한
+RATE_LIMIT_PER_MIN = _as_int("RATE_LIMIT_PER_MIN", 60)  # 클라이언트당 분당 요청 수 (0=끔)
+
 # ── 중간 에이전트 토큰 스트리밍(thinking 채널) ────────────────────────────
 SHOW_THINKING_TOKENS = _as_bool(_get("SHOW_THINKING_TOKENS", "0"))
 

@@ -27,7 +27,7 @@
 -------------
 - 파일/노드 수가 적고, 흐름을 한 함수에서 위에서 아래로 읽을 수 있다.
 """
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import interrupt
 
 import app.config as cfg
@@ -95,6 +95,35 @@ def _needs_exit(sc: dict, config) -> dict:
          {"agent": "ActionAgent",
           "detail": f"{sc['needs']['agent']} 에게 {sc['needs']['fill']} 조회 위임"})
     return {"action": sc, "next": "Supervisor"}
+
+
+def _restart(text: str, config) -> dict:
+    """맥락 이탈 — 진행 중 액션을 접고 사용자의 새 발화로 다시 시작한다.
+
+    사람들은 수집 도중에도 맥락을 벗어난 새 질문을 던진다.
+    그 발화를 새 HumanMessage 로 넣어 Supervisor 부터(ExtractAgent 선행) 다시 태운다.
+    """
+    _log("restart", f"새 질문으로 재시작: '{text}'")
+    emit(config, "agent_status",
+         {"agent": "ActionAgent", "detail": "이전 작업 중단, 새 질문 처리"})
+    return {
+        "messages": [HumanMessage(content=text)],
+        "action": {},          # 스크래치 리셋
+        "next": "Supervisor",
+    }
+
+
+def _read_ids(text: str, config) -> dict:
+    """ID 판독기(툴). 발화에서 캐리어/장비 ID 를 인식·검증한다.
+
+    ★ 실무 교체 지점: 지금은 정규식(resolvers.extract_ids)이지만, 캐리어 ID 형식이
+      항상 정형화돼 있지 않으므로 실제로는 DB 를 보는 툴로 바꿔야 한다.
+    트레이스에 입력(text)과 결과(ids)를 남긴다.
+    """
+    ids = resolvers.extract_ids(text)
+    emit(config, "tool_call", {"agent": "ActionAgent", "tool": "params_extract_tool",
+                               "args": {"text": text}, "result": ids})
+    return ids
 
 
 def action_node(state: AgentState, config) -> dict:
@@ -197,48 +226,47 @@ def action_node(state: AgentState, config) -> dict:
             # 여기 도달했다는 건 이 interrupt 에 답이 있다는 뜻(신규 or replay)
             _log("collect_param", f"answer #{interrupt_no} = {answer!r}")
 
-            # ── 3-a. 답변 해석 4분기: 취소 / 리터럴 / 참조(needs) / 해석불능
-            r = resolvers.resolve_param_answer(fieldname, answer, sc.get("action"))
-            emit(config, "tool_call", {"agent": "ActionAgent", "tool": "resolve_param_answer",
-                                       "args": {"field": fieldname}, "result": {"kind": r["kind"]}})
+            # ── 3-a. 답변 판정: 취소 / 참조(needs) / 맥락이탈(재시작) / 액션 / 값 / 재질문
+            r = resolvers.classify_collect_answer(fieldname, answer, sc.get("action"))
 
             if r["kind"] == "cancel":
                 sc["abandon_reason"] = "사용자 요청으로 명령을 취소했습니다."
-                _log("merge_param", "취소 의도 -> abandon")
+                _log("merge_param", "취소 -> abandon")
                 return _abandon(sc, config)
 
-            if r["kind"] == "flip":
-                old = sc.get("action")
-                keep = {k: v for k, v in sc.get("params", {}).items() if k == "carrier_id"}
-                ids = r.get("ids", {})
-                if ids.get("carrier_ids"):
-                    keep["carrier_id"] = ids["carrier_ids"][0]
-                if ids.get("eqp_ids") and r["action"] == "transport":
-                    keep["eqp_id"] = ids["eqp_ids"][0]
-                sc.update({"action": r["action"], "params": keep, "reference": None,
-                           "validation": None, "collect_retries": 0, "validate_retries": 0})
-                _log("merge_param", f"의도 전환 {old} -> {r['action']}, params={keep}")
+            # 맥락 이탈 -> 진행 중 액션 접고 새 질문으로 재시작 (항목 12)
+            if r["kind"] == "switch":
+                _log("merge_param", f"맥락 이탈 -> 재시작: '{r['text']}'")
+                return _restart(r["text"], config)
 
-            elif r["kind"] == "filled":
-                if r["field"] == "action":
-                    sc["action"] = r["value"]
-                else:
-                    sc["params"][r["field"]] = r["value"].upper()
-                ids = r.get("ids", {})
-                if ids.get("carrier_ids") and not sc["params"].get("carrier_id"):
-                    sc["params"]["carrier_id"] = ids["carrier_ids"][0]
-                if ids.get("eqp_ids") and not sc["params"].get("eqp_id"):
-                    sc["params"]["eqp_id"] = ids["eqp_ids"][0]
-                _log("merge_param", f"채움 -> params={sc['params']} action={sc.get('action')}")
-
-            elif r["kind"] == "reference":
+            if r["kind"] == "reference":
                 sc["reference"] = r["reference"]
                 _log("merge_param", f"참조형 답변 -> {r['reference']}")
 
-            else:  # unparsed
+            elif r["kind"] == "action":
+                sc["action"] = r["value"]
+                _log("merge_param", f"액션 선택 -> {r['value']}")
+
+            elif r["kind"] == "value":
+                # 값 후보 -> ID 판독기 툴로 실제 인식·검증 (항목 11)
+                ids = _read_ids(r["text"], config)
+                pool = ids["carrier_ids"] if fieldname == "carrier_id" else ids["eqp_ids"]
+                if pool:
+                    sc["params"][fieldname] = pool[0].upper()
+                    if ids["carrier_ids"] and not sc["params"].get("carrier_id"):
+                        sc["params"]["carrier_id"] = ids["carrier_ids"][0]
+                    if ids["eqp_ids"] and not sc["params"].get("eqp_id"):
+                        sc["params"]["eqp_id"] = ids["eqp_ids"][0]
+                    _log("merge_param", f"값 인식 -> params={sc['params']}")
+                else:
+                    sc["collect_retries"] = sc.get("collect_retries", 0) + 1
+                    sc["last_parse_error"] = f"입력하신 값에서 유효한 {fieldname} 를 찾지 못했습니다."
+                    _log("merge_param", f"값 인식 실패(재시도 {sc['collect_retries']})")
+
+            else:  # empty
                 sc["collect_retries"] = sc.get("collect_retries", 0) + 1
                 sc["last_parse_error"] = r.get("note", "")
-                _log("merge_param", f"해석 불가(재시도 {sc['collect_retries']}): {r.get('note')}")
+                _log("merge_param", f"재질문({sc['collect_retries']}): {r.get('note')}")
 
             continue        # 다시 param_check 부터
 
