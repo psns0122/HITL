@@ -55,10 +55,13 @@ def build_team_graph(model_name: str = None, checkpointer=None):
 
     workflow.add_node("StatusAgent",
                       functools.partial(_node.status_node, model_name=model_name))
-    workflow.add_node("LocationAgent",
-                      functools.partial(_node.location_node, model_name=model_name))
-    workflow.add_node("LogAgent",
-                      functools.partial(_node.log_node, model_name=model_name))
+    # LocationAgent / LogAgent 는 ActionAgent 의 needs-핸드오프도 처리한다.
+    # 노드 본문은 건드리지 않고 serve_needs 로 감싸서 메일박스만 채우게 한다
+    # (사내 이식 시에도 기존 에이전트 수정 없이 여기 배선만 바꾸면 된다).
+    workflow.add_node("LocationAgent", _node.serve_needs(
+        functools.partial(_node.location_node, model_name=model_name), "LocationAgent"))
+    workflow.add_node("LogAgent", _node.serve_needs(
+        functools.partial(_node.log_node, model_name=model_name), "LogAgent"))
     workflow.add_node("ExtractAgent",
                       functools.partial(_node.extract_node, model_name=model_name))
 

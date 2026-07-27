@@ -23,7 +23,7 @@ from app._agent import extract_intent
 from app._state import AgentState
 from app._util import emit, last_human_text
 from app.actions import resolvers
-from app.actions.registry import ACTION_REGISTRY, ACTION_SELECT_PROMPT, REFERENCE_AGENT
+from app.actions.registry import ACTION_REGISTRY, ACTION_SELECT_PROMPT
 from app.actions.tools import id_lookup_tool, param_check_tool
 
 # 진행 중으로 취급하는 phase (재진입 판정 기준)
@@ -99,30 +99,24 @@ def param_check_node(state: AgentState, config) -> dict:
                                "args": {"action": sc.get("action"), "params": sc["params"]},
                                "result": {"missing": sc["missing"]}})
 
-    # 1) 참조형 파라미터 → 동료 에이전트 위임 (needs-핸드오프)
+    # 1) 참조형 파라미터 → 동료에게 위임 요청 (needs-핸드오프)
     #
-    # 위임할 헬퍼가 없으면(REFERENCE_AGENT 에 매핑이 없음) 참조를 포기하고
-    # 사용자에게 직접 묻는다. ActionAgent 만 떼어 이식하는 경우처럼 동료
-    # 에이전트가 needs 계약을 모르는 환경에서도 나머지 HITL 은 그대로 돌게
-    # 하기 위한 강등 경로다. REFERENCE_AGENT 를 비우면 핸드오프가 통째로
-    # 꺼지고 참조형 답변은 전부 재질문으로 처리된다.
+    # 여기서는 '무엇이 필요한지'(kind)만 적는다. 누가 처리할지는 Supervisor 가
+    # 정한다 — ActionAgent 는 동료 워커의 이름을 알지 못한다.
+    # 처리할 수 있는 동료가 없으면 Supervisor 가 빈 결과를 채워 돌려보내고,
+    # 그때 아래 0) 회수 분기가 사용자에게 직접 묻는 쪽으로 강등한다.
     ref = sc.get("reference")
     if ref and ref.get("fill") in sc["missing"]:
-        agent = REFERENCE_AGENT.get(ref.get("kind"))
         if sc.get("hops", 0) >= cfg.MAX_HOPS:
             _log("param_check", f"MAX_HOPS({cfg.MAX_HOPS}) 초과 -> 참조 포기, 직접 질문")
             sc["reference"] = None
-        elif not agent:
-            _log("param_check", f"'{ref.get('kind')}' 담당 헬퍼 없음 -> 참조 포기, 직접 질문")
-            sc["reference"] = None
-            sc["last_parse_error"] = "참조로는 값을 채울 수 없습니다. 직접 입력해 주세요."
         else:
-            sc["needs"] = {"agent": agent, "fill": ref["fill"],
-                           "kind": ref["kind"], "carrier_id": ref.get("carrier_id"),
+            sc["needs"] = {"fill": ref["fill"], "kind": ref["kind"],
+                           "carrier_id": ref.get("carrier_id"),
                            "query": last_human_text(state.get("messages", []))}
             sc["phase"] = "awaiting_helper"
             sc["_route"] = "needs_exit"
-            _log("param_check", f"needs-핸드오프 -> {agent} ({ref})")
+            _log("param_check", f"needs-핸드오프 요청 (kind={ref['kind']}) -> Supervisor 가 배분")
             return {"action": sc}
 
     # 2) 미충족 → 수집 (한 번에 한 파라미터씩 질문)
@@ -466,7 +460,8 @@ def needs_exit_node(state: AgentState, config) -> dict:
     _log("needs_exit", f"Supervisor 에 양보 -> needs={sc.get('needs')}")
     emit(config, "agent_status",
          {"agent": "ActionAgent",
-          "detail": f"{sc['needs']['agent']} 에게 {sc['needs']['fill']} 조회 위임"})
+          "detail": f"{sc['needs']['fill']} 조회 위임 요청 "
+                    f"(kind={sc['needs']['kind']}) — 담당은 Supervisor 가 결정"})
     return {"action": sc, "next": "Supervisor"}
 
 

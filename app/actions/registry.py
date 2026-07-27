@@ -59,8 +59,12 @@ ACTION_SELECT_PROMPT = (
     "('반송' 또는 '목적지'라고 답해주세요. 취소하려면 '취소')"
 )
 
-# 참조 해석 종류 -> 담당 헬퍼 에이전트 (needs-핸드오프 라우팅 표)
-REFERENCE_AGENT = {
-    "carrier_location": "LocationAgent",
-    "log_analysis": "LogAgent",
-}
+# ── needs-핸드오프에서 ActionAgent 가 아는 것 / 모르는 것 ──────────────────
+#
+# ActionAgent 는 "carrier_location 을 해결해 줘" 라고 종류(kind)만 말한다.
+# 그걸 어느 에이전트가 처리하는지는 Supervisor 만 안다(_node.NEEDS_ROUTER).
+#
+# 워커가 동료 워커의 이름을 직접 알면 Supervisor 를 통해 배분한다는 규칙이
+# 깨지고, 에이전트 구성이 바뀔 때마다 액션 레이어까지 고쳐야 한다.
+# 그래서 여기에는 담당자 표를 두지 않는다.
+REFERENCE_KINDS = ("carrier_location", "log_analysis")
