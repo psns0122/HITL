@@ -8,12 +8,10 @@ lifespan 으로 MCP 연결을 서버 수명에 맞춰 붙였다 뗀다.
 """
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from app._mcp import mcp_manager
-from app.api import limits
 from app.api.routes import router
 
 
@@ -43,25 +41,5 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.middleware("http")
-async def rate_limit_middleware(request: Request, call_next):
-    """클라이언트(IP)당 분당 요청 수를 제한한다.
-
-    스트리밍 엔드포인트에만 적용하고, 넘치면 429 로 즉시 거절한다.
-    (동시성 제한은 대기, 유량 제한은 거절 — 성격이 달라 분리했다.)
-    """
-    if request.url.path.endswith("/chat/stream"):
-        client_id = request.client.host if request.client else "unknown"
-        ok, retry_after = limits.rate_limit_ok(client_id)
-        if not ok:
-            return JSONResponse(
-                status_code=429,
-                content={"error": "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.",
-                         "retry_after": retry_after},
-                headers={"Retry-After": str(retry_after)},
-            )
-    return await call_next(request)
-
 
 app.include_router(router, prefix="/llm/api")
