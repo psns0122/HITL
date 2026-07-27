@@ -11,16 +11,9 @@ def _log(msg: str):
     print(f"[RESOLVER] {msg}", flush=True)
 
 
-# ID 후보 토큰: 영숫자 3~20자 중 숫자를 하나라도 포함한 것.
-#
-# 이건 '유효한 ID 인지' 판정하는 정규식이 아니다. 형식은 여기서 따지지 않는다.
-# 캐리어/장비 ID 형식이 항상 정형화돼 있지 않으므로, ID 스러운 건 일단 전부
-# 후보로 올려서 판독기(tools.id_lookup_tool)에 넣고, 종류와 유효성은 판독기가
-# 조회해서 정한다.
-#
-# 주의: \b 는 한글도 \w 로 취급해 "STK102로"의 조사 앞에서 경계가 안 잡힌다
-#       -> ASCII 영숫자만 배제하는 lookaround 를 쓴다.
-ID_CANDIDATE_RE = re.compile(r"(?<![A-Z0-9])[A-Z0-9]{3,20}(?![A-Z0-9])")
+# ID 판독은 이 모듈 일이 아니다 — ExtractAgent 소유의 공용 판독기를 쓴다.
+# (ActionAgent 계열 코드가 여기 것을 import 하던 관성이 있어 이름만 이어준다)
+from app.id_reader import extract_ids, id_candidates  # noqa: F401 (재수출)
 
 CANCEL_RE = re.compile(r"취소|그만|중단|됐어|됐다|안\s*할|안할|말자|하지\s*마|cancel|abort|stop", re.I)
 APPROVE_RE = re.compile(r"승인|실행해|진행|허가|좋아|응\b|넵|네\b|예\b|yes|approve|ok|확인|고고|ㄱㄱ|y\b", re.I)
@@ -51,34 +44,6 @@ class IntentResult:
     params: dict = field(default_factory=dict)
     reference: dict | None = None        # {kind, carrier_id, fill}
     cancel: bool = False
-
-
-def id_candidates(text: str) -> list:
-    """발화에서 ID 일 '수도 있는' 토큰을 느슨하게 전부 뽑는다.
-
-    형식으로 걸러내지 않는다 — 판정은 판독기(tools.id_lookup_tool)가 한다.
-    여기서 하는 일은 "숫자가 섞인 영숫자 덩어리"를 순서대로 모아주는 것뿐이다.
-    """
-    up = (text or "").upper()
-    out = []
-    for tok in ID_CANDIDATE_RE.findall(up):
-        # 숫자가 하나도 없으면 ID 후보로 보지 않는다("STK", "OK" 같은 말 배제)
-        if not any(ch.isdigit() for ch in tok):
-            continue
-        if tok not in out:
-            out.append(tok)
-    return out
-
-
-def extract_ids(text: str) -> dict:
-    """발화 -> {carrier_ids, eqp_ids, unknown}.
-
-    후보 추출(느슨) + 판독기 조회(권한) 두 단계로 나뉜다.
-    종류 판정은 정규식이 아니라 판독기가 한다.
-    """
-    from app.actions.tools import id_lookup_tool   # 순환 import 회피
-
-    return id_lookup_tool(id_candidates(text))
 
 
 def detect_intent(text: str) -> str | None:

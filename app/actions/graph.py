@@ -31,7 +31,10 @@ from app._state import AgentState
 from app._util import emit, last_human_text
 from app.actions import resolvers
 from app.actions.registry import ACTION_REGISTRY, ACTION_SELECT_PROMPT
-from app.actions.tools import id_lookup_tool, param_check_tool
+from app.actions.tools import param_check_tool
+# ID 판독기는 ExtractAgent 소유의 툴이지만, HITL 수집 루프는 답변마다 판독이
+# 필요해 Supervisor 왕복을 태울 수 없다. 예외적으로 툴만 공용으로 빌려 쓴다.
+from app.id_reader import id_lookup_tool
 
 # 진행 중으로 취급하는 phase (재진입 판정 기준)
 ACTIVE_PHASES = {"param_check", "collecting", "awaiting_helper", "validating", "confirming"}
@@ -43,6 +46,26 @@ def _log(node: str, msg: str):
 
 def _scratch(state: AgentState) -> dict:
     return dict(state.get("action") or {})
+
+
+# 추임새/기호를 걷어낸 알맹이가 이만큼은 남아야 '정보가 있는 답변'으로 본다
+_NOISE_CHARS_RE = None   # 아래에서 lazy compile (모듈 import 순서 때문)
+
+
+def _looks_substantive(text: str) -> bool:
+    """답변에 '정보가 실려 있어 보이는지' 대충 가른다.
+
+    Supervisor 상담(LLM 1회)을 태울 가치가 있는 답인지 거르는 문지방일 뿐,
+    정밀할 필요는 없다. 잘못 통과해도 결과는 상담 1회 후 재질문이고,
+    잘못 걸러져도 결과는 그냥 재질문이다.
+    """
+    global _NOISE_CHARS_RE
+    if _NOISE_CHARS_RE is None:
+        import re
+        # 공백/문장부호/웃음·추임새 자모를 걷어낸다
+        _NOISE_CHARS_RE = re.compile(r"[\s\.\,\?\!…~\-ㅋㅎㅠㅜㅇ]+")
+    core = _NOISE_CHARS_RE.sub("", str(text or ""))
+    return len(core) >= 3
 
 
 # ── 노드들 ────────────────────────────────────────────────────────────────
@@ -204,15 +227,10 @@ def collect_param_node(state: AgentState, config) -> dict:
 
 
 def _read_ids(text: str, config) -> dict:
-    """ID 판독기 호출. 발화에서 캐리어/장비 ID 를 인식한다.
+    """ID 판독기(공용 툴) 호출. 발화에서 캐리어/장비 ID 를 인식한다.
 
-    두 단계로 나뉜다.
-      1) id_candidates : ID 스러운 토큰을 형식 안 따지고 전부 후보로 (느슨)
-      2) id_lookup_tool: 그게 캐리어인지 장비인지 아무것도 아닌지 조회 (권한)
-
-    ★ 실무 교체 지점은 tools.id_lookup_tool 본문 한 곳이다.
-      여기 인터페이스는 그대로 두고 그 함수만 사내 조회로 바꾸면
-      infer_intent·merge_param·ExtractAgent 가 모두 따라온다.
+    판독기는 ExtractAgent 소유(app/id_reader.py)고 여기서는 빌려 쓰는
+    입장이다. ★ 실무 교체 지점은 id_reader.id_lookup_tool 본문 한 곳.
 
     트레이스에 입력(text/후보)과 결과(ids)를 남긴다.
     """
@@ -293,17 +311,32 @@ def merge_param_node(state: AgentState, config) -> dict:
             _log("merge_param", f"다른 종류 ID 감지 -> Supervisor 상담: '{r['text']}'")
             return {"action": sc}
 
-        # 판독기가 값을 못 찾음 -> 재질문.
-        # 후보로는 올라왔는데 조회에 안 걸린 경우엔 그 토큰을 짚어준다.
-        sc["collect_retries"] = sc.get("collect_retries", 0) + 1
+        # ID 스러운 토큰이 있었는데 조회에 안 걸림 -> 그 토큰을 짚어 재질문.
+        # (존재하지 않는 ID 는 동료가 대신 만들어 줄 수 없다 — 상담 안 간다)
         if ids["unknown"]:
+            sc["collect_retries"] = sc.get("collect_retries", 0) + 1
             sc["last_parse_error"] = (
                 f"'{', '.join(ids['unknown'])}' 은(는) 조회되지 않는 ID 입니다.")
-        else:
-            sc["last_parse_error"] = f"입력하신 값에서 {fieldname} 를 찾지 못했습니다."
+            sc["_route"] = "param_check"
+            _log("merge_param", f"미조회 ID 재질문(재시도 {sc['collect_retries']}): "
+                                f"{ids['unknown']}")
+            return {"action": sc}
+
+        # ID 판독과 무관한 답변인데 개소리 같지는 않다 -> Supervisor 상담.
+        # ("그 스토커로", "아까 장애 났던 데 말고" 처럼 정보가 실린 것 같은 답)
+        # 풀어줄 워커가 있는지는 Supervisor 가 로스터 보고 정하고,
+        # 없으면 빈 메일박스로 돌아와 재질문으로 강등된다.
+        if _looks_substantive(r["text"]):
+            sc["consult_text"] = r["text"]
+            sc["_route"] = "param_check"
+            _log("merge_param", f"판독 불가·정보성 답변 -> Supervisor 상담: '{r['text']}'")
+            return {"action": sc}
+
+        # 진짜 노이즈 ("음...", "ㅋㅋ") -> 그냥 재질문
+        sc["collect_retries"] = sc.get("collect_retries", 0) + 1
+        sc["last_parse_error"] = f"입력하신 값에서 {fieldname} 를 찾지 못했습니다."
         sc["_route"] = "param_check"
-        _log("merge_param", f"값 인식 실패(재시도 {sc['collect_retries']}): "
-                            f"unknown={ids['unknown']}")
+        _log("merge_param", f"값 인식 실패(재시도 {sc['collect_retries']})")
         return {"action": sc}
 
     # empty
