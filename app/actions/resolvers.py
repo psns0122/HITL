@@ -25,6 +25,16 @@ REJECT_RE = re.compile(r"거절|거부|아니|안\s*해|no\b|reject|n\b", re.I)
 TRANSPORT_RE = re.compile(r"반송|이송|옮겨|옮기|이동|transport", re.I)
 DEST_REQ_RE = re.compile(r"목적지|dest", re.I)
 
+# 수집 도중 사용자가 "새 요청"을 시작한 걸로 볼 신호.
+#  - 다른 명령(반송/목적지/명령/실행/요청) 이거나
+#  - 다른 에이전트 영역(위치/상태/로그/추출) 질의
+# 이게 잡히면 진행 중이던 액션을 접고 새 질문으로 다시 시작한다(맥락 이탈 대응).
+CONTEXT_SWITCH_RE = re.compile(
+    r"반송|이송|옮겨|옮기|이동|목적지|명령|실행\s*(해|시켜|해줘|하라)|요청\s*(해|생성)"
+    r"|위치|어디|상태|서버|큐|로그|이력|에러|원인|추출|알려\s*줘|조회",
+    re.I,
+)
+
 # "…있는 위치로", "…자리로" 등 위치 참조
 LOCATION_REF_RE = re.compile(r"(있는\s*)?(위치|자리|곳)(로|으로|에)?")
 # "로그 분석해서 원인 장비로…" 류 분석 참조
@@ -130,37 +140,57 @@ def parse_intent(text: str) -> IntentResult:
     return r
 
 
-def resolve_param_answer(fieldname: str, answer, current_action: str | None) -> dict:
-    """collect_param interrupt 답변 해석 4분기.
+def classify_collect_answer(fieldname: str, answer, current_action: str | None) -> dict:
+    """수집(collect_param) 답변이 무엇인지 판정한다.
 
-    반환: {"kind": "cancel" | "filled" | "reference" | "flip" | "unparsed", ...}
+    (구 이름 resolve_param_answer — 이름이 모호해서 바꿈)
+
+    판정 우선순위
+      1) cancel   : 그만/취소  -> 액션 종료
+      2) reference : "X 있는 위치로" 처럼 동료 조회가 필요한 답변 -> needs 핸드오프
+      3) switch   : 새 명령/다른 에이전트 질의를 시작함 -> 액션 접고 새 질문으로 재시작
+      4) action   : (action 을 묻는 중일 때) 반송/목적지 중 선택
+      5) value    : 파라미터 값 후보. 실제 ID 인식·검증은 ID 판독기(툴)가 한다.
+      6) empty    : 아무것도 못 알아들음 -> 재질문
+
+    반환: {"kind": ..., ...}
+      value 는 raw text 를 그대로 넘긴다. 무엇이 유효한 ID 인지는
+      호출부(merge_param)가 ID 판독기 툴을 태워서 정한다(항목 11).
     """
     text = str(answer or "")
-    _log(f"resolve_param_answer field={fieldname} answer='{text}'")
+    _log(f"classify_collect_answer field={fieldname} answer='{text}'")
 
+    # 1) 취소
     if detect_cancel(answer):
         return {"kind": "cancel"}
 
-    # 의도 전환 감지 (수집 중 사용자가 다른 액션으로 피벗)
-    new_intent = detect_intent(text)
-    if fieldname != "action" and new_intent and current_action and new_intent != current_action:
-        _log(f"intent flip: {current_action} -> {new_intent}")
-        return {"kind": "flip", "action": new_intent, "ids": extract_ids(text)}
-
-    if fieldname == "action":
-        if new_intent:
-            return {"kind": "filled", "field": "action", "value": new_intent,
-                    "ids": extract_ids(text)}
-        return {"kind": "unparsed", "note": "반송/목적지 중 하나로 답해주세요."}
-
+    # 2) 참조형 ("9ZXCV456 있는 위치로") — switch 보다 먼저 본다.
+    #    "위치" 키워드가 switch 로 오인되지 않게 하기 위함.
     ref = detect_reference(text)
     if ref and ref["fill"] == fieldname:
         return {"kind": "reference", "reference": ref}
 
-    ids = extract_ids(text)
-    pool = ids["carrier_ids"] if fieldname == "carrier_id" else ids["eqp_ids"]
-    if pool:
-        return {"kind": "filled", "field": fieldname, "value": pool[0], "ids": ids}
+    # 3) 액션 자체를 묻는 중 — "반송" 은 여기선 정상 답이지 switch 가 아니다.
+    if fieldname == "action":
+        new_intent = detect_intent(text)
+        if new_intent:
+            return {"kind": "action", "value": new_intent}
+        if CONTEXT_SWITCH_RE.search(text):
+            return {"kind": "switch", "text": text}
+        return {"kind": "empty", "note": "반송 / 목적지 중 하나로 답해주세요."}
 
-    return {"kind": "unparsed",
-            "note": f"답변에서 {fieldname} 값을 찾지 못했습니다. 형식을 확인해 주세요."}
+    # 4) 맥락 이탈: 새 명령이나 다른 에이전트 질의를 시작함.
+    #    단, 지금 묻는 파라미터 ID 만 덜렁 준 경우(짧은 답)는 값으로 본다.
+    ids = extract_ids(text)
+    field_pool = ids["carrier_ids"] if fieldname == "carrier_id" else ids["eqp_ids"]
+    looks_like_bare_value = bool(field_pool) and len(text.strip()) <= 20
+    if not looks_like_bare_value and CONTEXT_SWITCH_RE.search(text):
+        _log(f"context switch 감지 -> 새 질문으로 재시작: '{text}'")
+        return {"kind": "switch", "text": text}
+
+    # 5) 파라미터 값 후보 (raw text 를 넘긴다 — 검증은 호출부가 툴로)
+    return {"kind": "value", "text": text}
+
+
+# 구 이름 호환 별칭
+resolve_param_answer = classify_collect_answer

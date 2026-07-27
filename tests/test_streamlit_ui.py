@@ -77,9 +77,15 @@ def main():
     assert not at.exception, at.exception
     md = "\n".join(m.value for m in at.markdown)
     assert "TJ-" in md and "실행 완료" in md, md[-800:]
+    # 토큰/시간은 하단 접이식 카드(metric + caption)로 이동했다
     caps = "\n".join(c.value for c in at.caption)
-    assert "tok" in caps and "HITL" in caps, caps[-400:]
-    print("3) 승인 클릭 -> 실행 결과 + 토큰/시간 캡션 PASS")
+    metric_labels = [m.label for m in at.metric]
+    assert "토큰" in caps, caps[-400:]
+    assert "첫 응답" in metric_labels and "HITL" in metric_labels, metric_labels
+    # 시간은 초 단위로 표기 (ms 아님)
+    metric_values = [m.value for m in at.metric]
+    assert any(str(v).endswith("s") for v in metric_values), metric_values
+    print("3) 승인 클릭 -> 실행 결과 + 상세 카드(초 단위) PASS")
 
     # 4) 트레이스(노드/툴 단계)가 쌓였는지
     assert any("ActionAgent" in m.value for m in at.markdown), "트레이스에 ActionAgent 없음"

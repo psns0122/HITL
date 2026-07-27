@@ -14,7 +14,7 @@ needs-핸드오프:
   아니라 '서브그래프 정상 종료'로 Supervisor 에게 양보하고, 헬퍼가
   action.needs_result 메일박스를 채워주면 재진입해 param_check 부터 재개한다.
 """
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
@@ -166,59 +166,93 @@ def collect_param_node(state: AgentState, config) -> dict:
     return {"action": sc}
 
 
+def _read_ids(text: str, config) -> dict:
+    """ID 판독기(툴). 발화에서 캐리어/장비 ID 를 인식·검증한다.
+
+    ★ 실무 교체 지점: 지금은 정규식(resolvers.extract_ids)이지만, 캐리어 ID 형식이
+      항상 정형화돼 있지 않으므로 실제로는 DB 를 보는 툴로 바꿔야 한다.
+      여기 한 곳만 바꾸면 infer_intent·merge_param·ExtractAgent 가 모두 따라온다.
+
+    트레이스에 입력(text)과 결과(ids)를 남긴다(항목 10).
+    """
+    ids = resolvers.extract_ids(text)
+    emit(config, "tool_call", {
+        "agent": "ActionAgent",
+        "tool": "params_extract_tool",     # ID 판독기
+        "args": {"text": text},
+        "result": ids,
+    })
+    return ids
+
+
 def merge_param_node(state: AgentState, config) -> dict:
-    """HITL 답변 해석 4분기: 취소 / 리터럴 / 참조(needs) / 해석불능."""
+    """수집 답변을 판정해 처리한다.
+
+    분기: 취소 / 참조(needs) / 맥락이탈(재시작) / 액션선택 / 값 / 재질문
+    """
     sc = _scratch(state)
     answer = sc.pop("pending_answer", None)
     fieldname = sc.get("pending_field")
     _log("merge_param", f"enter field={fieldname}")
 
-    r = resolvers.resolve_param_answer(fieldname, answer, sc.get("action"))
-    emit(config, "tool_call", {"agent": "ActionAgent", "tool": "resolve_param_answer",
-                               "args": {"field": fieldname}, "result": {"kind": r["kind"]}})
+    r = resolvers.classify_collect_answer(fieldname, answer, sc.get("action"))
 
+    # 취소
     if r["kind"] == "cancel":
         sc["abandon_reason"] = "사용자 요청으로 명령을 취소했습니다."
         sc["_route"] = "abandon"
-        _log("merge_param", "취소 의도 -> abandon")
+        _log("merge_param", "취소 -> abandon")
         return {"action": sc}
 
-    if r["kind"] == "flip":
-        # 의도 전환: 호환 파라미터(carrier_id)만 승계하고 스크래치 재구성
-        old = sc.get("action")
-        keep = {k: v for k, v in sc.get("params", {}).items() if k == "carrier_id"}
-        ids = r.get("ids", {})
-        if ids.get("carrier_ids"):
-            keep["carrier_id"] = ids["carrier_ids"][0]
-        if ids.get("eqp_ids") and r["action"] == "transport":
-            keep["eqp_id"] = ids["eqp_ids"][0]
-        sc.update({"action": r["action"], "params": keep, "reference": None,
-                   "validation": None, "collect_retries": 0, "validate_retries": 0})
-        _log("merge_param", f"의도 전환 {old} -> {r['action']}, params={keep}")
+    # 맥락 이탈 — 진행 중 액션을 접고 새 질문으로 재시작 (항목 12)
+    if r["kind"] == "switch":
+        sc["switch_text"] = r["text"]
+        sc["_route"] = "restart"
+        _log("merge_param", f"맥락 이탈 -> 재시작: '{r['text']}'")
+        return {"action": sc}
 
-    elif r["kind"] == "filled":
-        if r["field"] == "action":
-            sc["action"] = r["value"]
-        else:
-            sc["params"][r["field"]] = r["value"].upper()
-        # 같은 답변에 실려온 다른 ID 도 기회적으로 흡수
-        ids = r.get("ids", {})
-        if ids.get("carrier_ids") and not sc["params"].get("carrier_id"):
-            sc["params"]["carrier_id"] = ids["carrier_ids"][0]
-        if ids.get("eqp_ids") and not sc["params"].get("eqp_id"):
-            sc["params"]["eqp_id"] = ids["eqp_ids"][0]
-        _log("merge_param", f"채움 -> params={sc['params']} action={sc.get('action')}")
-
-    elif r["kind"] == "reference":
+    # 참조형 -> needs 핸드오프는 param_check 가 처리
+    if r["kind"] == "reference":
         sc["reference"] = r["reference"]
-        _log("merge_param", f"참조형 답변 -> {r['reference']} (param_check 에서 needs 처리)")
+        sc["_route"] = "param_check"
+        _log("merge_param", f"참조형 답변 -> {r['reference']}")
+        return {"action": sc}
 
-    else:  # unparsed
+    # 액션 선택 (action 을 묻던 중)
+    if r["kind"] == "action":
+        sc["action"] = r["value"]
+        sc["_route"] = "param_check"
+        _log("merge_param", f"액션 선택 -> {r['value']}")
+        return {"action": sc}
+
+    # 값 후보 -> ID 판독기 툴로 실제 인식·검증 (항목 11)
+    if r["kind"] == "value":
+        ids = _read_ids(r["text"], config)
+        pool = ids["carrier_ids"] if fieldname == "carrier_id" else ids["eqp_ids"]
+
+        if pool:
+            sc["params"][fieldname] = pool[0].upper()
+            # 같은 답변에 실려온 다른 ID 도 기회적으로 흡수
+            if ids["carrier_ids"] and not sc["params"].get("carrier_id"):
+                sc["params"]["carrier_id"] = ids["carrier_ids"][0]
+            if ids["eqp_ids"] and not sc["params"].get("eqp_id"):
+                sc["params"]["eqp_id"] = ids["eqp_ids"][0]
+            sc["_route"] = "param_check"
+            _log("merge_param", f"값 인식 -> params={sc['params']}")
+            return {"action": sc}
+
+        # 판독기가 유효한 값을 못 찾음 -> 재질문
         sc["collect_retries"] = sc.get("collect_retries", 0) + 1
-        sc["last_parse_error"] = r.get("note", "")
-        _log("merge_param", f"해석 불가(재시도 {sc['collect_retries']}): {r.get('note')}")
+        sc["last_parse_error"] = f"입력하신 값에서 유효한 {fieldname} 를 찾지 못했습니다."
+        sc["_route"] = "param_check"
+        _log("merge_param", f"값 인식 실패(재시도 {sc['collect_retries']})")
+        return {"action": sc}
 
+    # empty
+    sc["collect_retries"] = sc.get("collect_retries", 0) + 1
+    sc["last_parse_error"] = r.get("note", "")
     sc["_route"] = "param_check"
+    _log("merge_param", f"재질문({sc['collect_retries']}): {r.get('note')}")
     return {"action": sc}
 
 
@@ -333,6 +367,27 @@ def abandon_node(state: AgentState, config) -> dict:
     }
 
 
+def restart_node(state: AgentState, config) -> dict:
+    """맥락 이탈 처리 — 진행 중 액션을 접고, 사용자의 새 발화로 다시 시작한다.
+
+    사람들은 수집 도중에도 맥락을 벗어난 새 질문을 던진다.
+    그럴 땐 스크래치를 리셋하고, 그 발화를 새 HumanMessage 로 넣어
+    Supervisor 부터(ExtractAgent 선행 포함) 다시 태운다.
+    """
+    sc = _scratch(state)
+    text = sc.get("switch_text", "")
+    _log("restart", f"새 질문으로 재시작: '{text}'")
+    emit(config, "agent_status",
+         {"agent": "ActionAgent", "detail": "이전 작업 중단, 새 질문 처리"})
+
+    return {
+        # 새 발화를 대화에 넣어 뒤 단계가 이걸 '이번 질문'으로 읽게 한다
+        "messages": [HumanMessage(content=text)],
+        "action": {},          # 스크래치 리셋
+        "next": "Supervisor",
+    }
+
+
 def needs_exit_node(state: AgentState, config) -> dict:
     """동료 에이전트에게 양보하며 서브그래프를 '정상 종료'(interrupt 아님).
 
@@ -367,6 +422,7 @@ def build_action_graph():
     g.add_node("execute", execute_node)
     g.add_node("finalize", finalize_node)
     g.add_node("abandon", abandon_node)
+    g.add_node("restart", restart_node)
     g.add_node("needs_exit", needs_exit_node)
 
     g.add_edge(START, "action_entry")
@@ -378,7 +434,8 @@ def build_action_graph():
                              "needs_exit": "needs_exit", "abandon": "abandon"})
     g.add_edge("collect_param", "merge_param")
     g.add_conditional_edges("merge_param", _route,
-                            {"param_check": "param_check", "abandon": "abandon"})
+                            {"param_check": "param_check", "abandon": "abandon",
+                             "restart": "restart"})
     g.add_conditional_edges("validate", _route,
                             {"confirm": "confirm", "param_check": "param_check",
                              "abandon": "abandon"})
@@ -387,6 +444,7 @@ def build_action_graph():
     g.add_edge("execute", "finalize")
     g.add_edge("finalize", END)
     g.add_edge("abandon", END)
+    g.add_edge("restart", END)
     g.add_edge("needs_exit", END)
 
     return g.compile()
@@ -394,5 +452,5 @@ def build_action_graph():
 
 ACTION_SUBGRAPH_NODES = {
     "action_entry", "infer_intent", "param_check", "collect_param", "merge_param",
-    "validate", "confirm", "execute", "finalize", "abandon", "needs_exit",
+    "validate", "confirm", "execute", "finalize", "abandon", "restart", "needs_exit",
 }

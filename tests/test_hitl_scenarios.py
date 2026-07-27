@@ -111,14 +111,28 @@ async def main():
     assert "찾을 수 없" in iv["prompt"] or "직접" in iv["prompt"], iv["prompt"]
     print("J) helper-fail -> HITL downgrade PASS")
 
-    # K: 수집 중 의도 전환 transport -> dest_req
+    # K: 수집 중 맥락 이탈 -> 진행 중 액션 접고 새 질문으로 재시작
+    #    "9ZXCV456 목적지 요청" 은 새 명령(다른 캐리어)이므로 switch -> 재시작.
+    #    dest_req 는 carrier 만 있으면 되니 곧장 confirm 으로 간다.
     cfg = C("K")
     await graph.ainvoke({"messages": [HumanMessage("6PDMQ283 반송해줘")]}, cfg)
-    await graph.ainvoke(Command(resume="아냐 그냥 목적지 요청으로 바꿔줘"), cfg)
+    snap = await graph.aget_state(cfg)
+    assert snap.interrupts[0].value["field"] == "eqp_id"      # eqp 묻는 중
+    await graph.ainvoke(Command(resume="9ZXCV456 목적지 요청해줘"), cfg)
     snap = await graph.aget_state(cfg)
     iv = snap.interrupts[0].value
     assert iv["type"] == "confirm" and iv["action"] == "dest_req", iv
-    print("K) intent flip mid-collect PASS")
+    assert iv["params"]["carrier_id"] == "9ZXCV456", iv       # 새 캐리어로 재시작
+    print("K) context-switch restart mid-collect PASS")
+
+    # M: 수집 중 완전히 다른 에이전트 질의(위치) -> 재시작해 위치로 응답
+    cfg = C("M")
+    await graph.ainvoke({"messages": [HumanMessage("6PDMQ283 반송해줘")]}, cfg)
+    r = await graph.ainvoke(Command(resume="아 3KWQ7712 지금 어디 있어?"), cfg)
+    snap = await graph.aget_state(cfg)
+    assert not snap.interrupts, snap.interrupts                # 인터럽트 없이 바로 답
+    assert "PHT201" in r["messages"][-1].content, r["messages"][-1].content
+    print("M) context-switch to LocationAgent PASS")
 
     # L: 액션 불명 질의 -> action 자체를 HITL 로 질문
     cfg = C("L")

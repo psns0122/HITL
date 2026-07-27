@@ -145,6 +145,15 @@ def supervisor_node(state: _state.AgentState, config) -> dict:
              {"agent": "Supervisor", "detail": "ExtractAgent 선행 실행"})
         return {"next": "ExtractAgent", "step": step + 1}
 
+    # 3-b) Extract 게이트: 추출된 게 없으면 워커를 안 돌리고 바로 Final (항목 6)
+    #      진행 중 액션이 없을 때만. (Action 은 위 2)에서 이미 걸러졌다.)
+    extracted = (state.get("facts") or {}).get("extracted") or {}
+    if extracted and not extracted.get("gate_pass"):
+        print("[NODE] Supervisor: Extract 게이트 실패 -> FinalAnswerAgent", flush=True)
+        emit(config, "agent_status",
+             {"agent": "Supervisor", "detail": "추출 결과 없음 -> 바로 응답"})
+        return {"next": "FinalAnswerAgent", "step": step + 1}
+
     # 4) 이번 턴에 워커가 이미 답을 냈으면 마무리
     #    (ExtractAgent 는 답변 워커가 아니라 여기서 제외된다)
     if member_answered_this_turn(messages, ANSWERING_MEMBERS):
@@ -359,14 +368,25 @@ def extract_node(state: _state.AgentState, config, model_name: str = None) -> di
     carriers = ids.get("carrier_ids") or []
     eqps = ids.get("eqp_ids") or []
 
+    # 게이트 판정: 이후 워커가 쓸 재료가 하나라도 있는가.
+    #   ID 가 있거나 / 명령 의도가 있거나 / 다른 에이전트 영역 키워드가 있으면 통과.
+    #   아무것도 없으면 통과 실패 -> Supervisor 가 워커를 안 돌리고 바로 Final 로 보낸다(항목 6).
+    gate_pass = bool(
+        carriers or eqps
+        or resolvers.detect_intent(text)
+        or resolvers.CONTEXT_SWITCH_RE.search(text or "")
+    )
+
     content = (f"[ExtractAgent] fab={fab}, "
-               f"carrier_ids={carriers or '없음'}, eqp_ids={eqps or '없음'}")
+               f"carrier_ids={carriers or '없음'}, eqp_ids={eqps or '없음'} "
+               f"(gate={'통과' if gate_pass else '실패'})")
     fake_llm_echo("extract", content, config=config, model_name=model)
 
     return {
         "messages": [AIMessage(content=content, name="ExtractAgent")],
         # 추출 결과는 facts 에도 넣어둔다 (limiter 에 안 잘리는 공유 팩트)
-        "facts": {"extracted": {"fab": fab, "carrier_ids": carriers, "eqp_ids": eqps}},
+        "facts": {"extracted": {"fab": fab, "carrier_ids": carriers,
+                                "eqp_ids": eqps, "gate_pass": gate_pass}},
         "step": state.get("step", 0) + 1,
     }
 
