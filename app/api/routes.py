@@ -382,6 +382,9 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
             "step_history": step_history,
             **body,
         })
+        # HITL 로 멈춘 턴에도 지금까지의 토큰/시간 집계를 보낸다.
+        # (원장은 닫지 않는다 — 다음 턴 답변까지 이어서 누적)
+        yield _event({"type": "usage", **usage_store.totals(thread_id)})
         yield _event({"type": "done", "reason": "interrupted"})
         return
 

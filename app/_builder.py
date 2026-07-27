@@ -24,7 +24,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app import _node, _state
-from app.actions.graph import build_action_graph
+from app.actions.node import build_action_node
 
 # ── 프로세스 공용 체크포인터 ──────────────────────────────────────────────
 # 그래프는 모델별로 따로 빌드되지만, 체크포인터는 절대 모델별로 나누면 안 된다.
@@ -64,8 +64,8 @@ def build_team_graph(model_name: str = None, checkpointer=None):
     workflow.add_node("ExtractAgent",
                       functools.partial(_node.extract_node, model_name=model_name))
 
-    # ActionAgent = HITL 서브그래프 (부모 입장에선 member 노드 하나)
-    workflow.add_node("ActionAgent", build_action_graph())
+    # ActionAgent = 턴 기반 HITL 단일 노드 (actions/node.py)
+    workflow.add_node("ActionAgent", build_action_node())
 
     workflow.add_node("FinalAnswerAgent",
                       functools.partial(_node.final_node, model_name=model_name))

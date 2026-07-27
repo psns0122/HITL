@@ -4,7 +4,7 @@ Router / Supervisor / Final* 은 사내 코드(shared_code.md) 형태를 유지�
 Location / Status / Log / Extract 는 목업 스텁이다.
 (단, needs-핸드오프 계약과 facts 적재는 실제로 동작한다.)
 
-ActionAgent 는 actions/graph.py 의 HITL 서브그래프가 담당한다.
+ActionAgent 는 actions/node.py 의 턴 기반 단일 노드가 담당한다.
 """
 from langchain_core.messages import AIMessage, HumanMessage
 

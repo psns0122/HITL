@@ -191,8 +191,8 @@ st.caption("Router → Supervisor → ExtractAgent → 워커 → FinalAnswerAge
 # 렌더 헬퍼
 # ─────────────────────────────────────────────────────────────────────────
 
-def render_trace(trace: list, expanded: bool = False):
-    """노드/툴 실행 트레이스를 접이식으로.
+def render_trace(trace: list, expanded: bool = True):
+    """노드/툴 실행 트레이스를 접이식으로. 기본은 펼침 — 접는 건 사용자 선택.
 
     진입점(node_enter)만 아이콘을 붙이고, 나머지(툴·상태)는 `- ...` 로 통일한다(항목 9).
     """

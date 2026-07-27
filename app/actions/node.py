@@ -555,15 +555,9 @@ def action_node(state: AgentState, config) -> dict:
     return _abandon(sc)
 
 
-def build_action_graph():
+def build_action_node():
     """부모 그래프에 등록할 ActionAgent 를 돌려준다.
 
-    서브그래프 버전은 compile() 된 그래프를 반환했지만, 이 버전은 노드 함수
-    하나를 그대로 반환한다. 부모(_builder.py)는 양쪽 모두 add_node 로 받으므로
-    수정이 필요 없다.
+    노드 함수 하나를 그대로 반환한다. 부모(_builder.py)가 add_node 로 받는다.
     """
     return action_node
-
-
-# 서브그래프 버전과의 호환용 (이 구현에는 내부 노드가 없다)
-ACTION_SUBGRAPH_NODES: set = set()
