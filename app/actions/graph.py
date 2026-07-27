@@ -100,13 +100,23 @@ def param_check_node(state: AgentState, config) -> dict:
                                "result": {"missing": sc["missing"]}})
 
     # 1) 참조형 파라미터 → 동료 에이전트 위임 (needs-핸드오프)
+    #
+    # 위임할 헬퍼가 없으면(REFERENCE_AGENT 에 매핑이 없음) 참조를 포기하고
+    # 사용자에게 직접 묻는다. ActionAgent 만 떼어 이식하는 경우처럼 동료
+    # 에이전트가 needs 계약을 모르는 환경에서도 나머지 HITL 은 그대로 돌게
+    # 하기 위한 강등 경로다. REFERENCE_AGENT 를 비우면 핸드오프가 통째로
+    # 꺼지고 참조형 답변은 전부 재질문으로 처리된다.
     ref = sc.get("reference")
     if ref and ref.get("fill") in sc["missing"]:
+        agent = REFERENCE_AGENT.get(ref.get("kind"))
         if sc.get("hops", 0) >= cfg.MAX_HOPS:
             _log("param_check", f"MAX_HOPS({cfg.MAX_HOPS}) 초과 -> 참조 포기, 직접 질문")
             sc["reference"] = None
+        elif not agent:
+            _log("param_check", f"'{ref.get('kind')}' 담당 헬퍼 없음 -> 참조 포기, 직접 질문")
+            sc["reference"] = None
+            sc["last_parse_error"] = "참조로는 값을 채울 수 없습니다. 직접 입력해 주세요."
         else:
-            agent = REFERENCE_AGENT[ref["kind"]]
             sc["needs"] = {"agent": agent, "fill": ref["fill"],
                            "kind": ref["kind"], "carrier_id": ref.get("carrier_id"),
                            "query": last_human_text(state.get("messages", []))}
