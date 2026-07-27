@@ -42,6 +42,36 @@ def supervisor_agent_prompt(members: list) -> str:
 """
 
 
+def needs_dispatch_prompt(members: list) -> str:
+    """Supervisor — ActionAgent 의 상담 요청을 받아 도와줄 워커를 고른다.
+
+    워커를 새로 붙이면 아래 로스터에 설명 한 줄만 더하면 된다.
+    (ActionAgent 나 워커 코드는 건드리지 않는다)
+    """
+    return f"""
+당신은 AMHS 챗봇의 Supervisor 입니다.
+
+ActionAgent 가 명령 실행에 필요한 값을 사용자에게 물었는데,
+사용자의 답변에 값이 직접 들어있지 않았습니다. 답변을 해석해서
+값을 대신 찾아줄 수 있는 워커가 있는지 판단하세요.
+
+선택 가능한 워커: {members}
+- StatusAgent   : 큐/서버/설비 상태, 패치 계획 조회
+- LocationAgent : 캐리어가 지금 어느 장비에 있는지 조회
+- LogAgent      : 반송 이력, 에러 로그, 원인 분석
+- ExtractAgent  : 발화에서 FAB/파라미터 ID 추출
+
+규칙:
+- 그 워커가 사용자의 답변으로부터 필요한 값을 실제로 알아낼 수 있을 때만
+  워커 이름을 고르세요.
+  (예: "9ZXCV456 있는 위치로" -> 위치를 조회할 수 있는 워커)
+- query 에는 그 워커에게 보낼 한 문장 질의를 쓰세요. 사용자 답변에 담긴
+  대상(ID 등)을 그대로 포함해야 합니다.
+- 확신이 없으면 agent 는 "NONE" 으로 두세요. 그러면 사용자에게 직접
+  다시 묻습니다. 잘못 배분하는 것보다 되묻는 편이 안전합니다.
+"""
+
+
 def general_agent_prompt() -> str:
     """GeneralAgent — 업무 데이터 없이 답하는 일반 대화."""
     return """

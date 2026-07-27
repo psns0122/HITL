@@ -199,7 +199,9 @@ def resolve_param_answer(fieldname: str, answer, current_action: str | None) -> 
 
     판정 우선순위
       1) cancel   : 그만/취소  -> 액션 종료
-      2) reference : "X 있는 위치로" 처럼 동료 조회가 필요한 답변 -> needs 핸드오프
+      2) consult  : 값이 간접적으로 실린 답변("X 있는 위치로") -> 답변 원문을
+                    들고 Supervisor 에 상담(needs 핸드오프). 누가 도울지는
+                    여기서 모른다.
       3) switch   : 새 명령/다른 에이전트 질의를 시작함 -> 액션 접고 새 질문으로 재시작
       4) action   : (action 을 묻는 중일 때) 반송/목적지 중 선택
       5) value    : 파라미터 값 후보. 실제 ID 인식·검증은 ID 판독기(툴)가 한다.
@@ -216,11 +218,15 @@ def resolve_param_answer(fieldname: str, answer, current_action: str | None) -> 
     if detect_cancel(answer):
         return {"kind": "cancel"}
 
-    # 2) 참조형 ("9ZXCV456 있는 위치로") — switch 보다 먼저 본다.
+    # 2) 상담형 ("9ZXCV456 있는 위치로") — switch 보다 먼저 본다.
     #    "위치" 키워드가 switch 로 오인되지 않게 하기 위함.
-    ref = detect_reference(text)
-    if ref and ref["fill"] == fieldname:
-        return {"kind": "reference", "reference": ref}
+    #
+    #    값이 답변에 간접적으로 실려 있는 경우다. 누가 그걸 풀어줄 수 있는지는
+    #    여기서 판단하지 않는다 — 답변 원문을 그대로 들고 Supervisor 에게
+    #    상담하러 간다(needs-핸드오프). detect_reference 는 FAKE 모드에서
+    #    '간접 답변 같다'는 신호로만 쓴다.
+    if detect_reference(text):
+        return {"kind": "consult", "text": text}
 
     # 3) 액션 자체를 묻는 중 — "반송" 은 여기선 정상 답이지 switch 가 아니다.
     if fieldname == "action":

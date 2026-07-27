@@ -295,6 +295,81 @@ def supervisor_agent(text: str, members: list, config=None, model_name: str = No
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# needs-핸드오프 배분 (Supervisor 소관)
+# ─────────────────────────────────────────────────────────────────────────
+
+class DispatchOut(BaseModel):
+    agent: str = Field("NONE", description="도와줄 워커 이름. 없으면 NONE")
+    query: Optional[str] = Field(
+        None, description="그 워커에게 보낼 한 문장 질의 (사용자 답변 속 대상 그대로)")
+
+
+def needs_dispatch(needs: dict, members: list, config=None,
+                   model_name: str = None) -> dict:
+    """ActionAgent 의 상담 요청을 받아 도와줄 워커를 고른다.
+
+    입력은 ActionAgent 가 넘긴 원문 세 가지뿐이다.
+      question : ActionAgent 가 사용자에게 물은 것
+      answer   : 사용자가 실제로 답한 것 (원문)
+      fill     : 필요한 값의 이름
+
+    로스터(members + 프롬프트의 워커 설명)를 보고 LLM 이
+      - 이 답변을 값으로 바꿔줄 수 있는 워커 하나와
+      - 그 워커에게 보낼 질의문
+    을 고른다. 확신이 없으면 NONE — 그러면 사용자에게 직접 다시 묻는다.
+
+    워커를 새로 붙일 때 할 일은 로스터 프롬프트에 설명 한 줄을 더하는 것뿐이다.
+    ActionAgent 도, 워커 본문도 건드리지 않는다.
+
+    반환: {"agent": 워커명 or None, "query": 질의문 or None}
+    """
+    answer = str(needs.get("answer") or "")
+
+    # 목업 모드: 참조 패턴 규칙이 LLM 자리를 대신한다 (데모/테스트용)
+    if cfg.FAKE_LLM:
+        ref = resolvers.detect_reference(answer)
+        agent, query = None, None
+        if ref and ref["kind"] == "carrier_location" and "LocationAgent" in members:
+            agent = "LocationAgent"
+            query = f"{ref.get('carrier_id')} 위치 알려줘"
+        elif ref and ref["kind"] == "log_analysis" and "LogAgent" in members:
+            agent = "LogAgent"
+            query = f"{ref.get('carrier_id') or ''} 반송 로그 분석해줘".strip()
+
+        _util.fake_llm_echo("needs_dispatch",
+                            json.dumps({"agent": agent, "query": query},
+                                       ensure_ascii=False),
+                            config=config, model_name=model_name)
+        _log(f"needs_dispatch(fake) -> {agent} query='{query}'")
+        return {"agent": agent, "query": query}
+
+    # 실제 LLM 호출
+    try:
+        out: DispatchOut = structured_invoke(
+            get_llm(model_name, temperature=0.0),
+            DispatchOut,
+            [
+                SystemMessage(content=_prompt.needs_dispatch_prompt(members).strip()),
+                HumanMessage(content=(
+                    f"ActionAgent 가 사용자에게 물은 것: {needs.get('question')}\n"
+                    f"사용자의 답변(원문): {answer}\n"
+                    f"필요한 값: {needs.get('fill')}\n"
+                    f"지금까지 확정된 파라미터: {needs.get('params')}"
+                )),
+            ],
+            config=config,
+        )
+        agent = out.agent if out.agent in members else None
+        query = out.query or (answer if agent else None)
+        _log(f"needs_dispatch(llm) -> {agent} query='{query}'")
+        return {"agent": agent, "query": query}
+
+    except Exception as e:
+        _log(f"needs_dispatch llm 실패({e}) -> NONE (사용자에게 직접 질문)")
+        return {"agent": None, "query": None}
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # ActionAgent 의도/파라미터 추출
 # ─────────────────────────────────────────────────────────────────────────
 

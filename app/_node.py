@@ -32,39 +32,15 @@ options_lower_map = {m.lower().replace("_", "").replace("-", ""): m for m in opt
 # Supervisor 무한 순환 방지 상한 (한 user turn 내 노드 스텝)
 MAX_SUPERVISOR_STEPS = 12
 
-# ── needs-핸드오프 능력표 ────────────────────────────────────────────────
+# needs-핸드오프에 별도 배분표는 없다.
 #
-# ActionAgent 는 "carrier_location 이 필요하다" 고 종류만 말한다.
-# 누가 처리하는지, 그 에이전트에게 어떻게 물어야 하는지, 답에서 값을 어떻게
-# 꺼내는지는 전부 여기 한 곳에 모여 있다. 에이전트 본문에는 아무것도 없다.
+# ActionAgent 는 "내가 이렇게 물었고(question) / 사용자가 이렇게 답했고
+# (answer) / 나는 이 값이 필요하다(fill)" 원문만 넘긴다. 어느 워커가 그걸
+# 풀 수 있는지는 Supervisor 가 평소 배분에 쓰는 것과 같은 로스터(members +
+# 프롬프트의 워커 설명)를 보고 LLM 으로 판단한다(_agent.needs_dispatch).
 #
-#   agent : 담당 워커 (Supervisor 가 배분할 때 본다)
-#   ask   : needs -> 그 워커가 평소 받는 형태의 질의문
-#           (핸드오프 재개 시 사용자의 HITL 답변은 HumanMessage 로 남지 않아
-#            대화록만 봐선 조회 대상을 알 수 없다. 그래서 어댑터가 needs 를
-#            평범한 질의로 '번역'해 넣어준다 — 워커는 평소처럼 동작하면 된다)
-#   pick  : 워커가 돌려준 dict -> 채울 값 (없으면 None)
-#
-# 새 참조 종류를 붙이거나 담당을 바꿀 때 이 표에만 줄을 추가하면 된다.
-# 매핑이 없는 종류는 '처리할 동료 없음' 으로 ActionAgent 에 돌려보내고,
-# ActionAgent 는 사용자에게 직접 묻는 쪽으로 강등한다.
-NEEDS_CAPABILITIES = {
-    "carrier_location": {
-        "agent": "LocationAgent",
-        "ask": lambda n: f"{n.get('carrier_id')} 위치 알려줘",
-        "pick": lambda out, n: (
-            (out.get("facts") or {}).get(n.get("carrier_id")) or {}).get("eqp_id"),
-    },
-    "log_analysis": {
-        "agent": "LogAgent",
-        "ask": lambda n: f"{n.get('carrier_id') or ''} 반송 로그 분석해줘".strip(),
-        "pick": lambda out, n: (
-            (out.get("facts") or {}).get("log_analysis") or {}).get("recommended_dest"),
-    },
-}
-
-# kind -> 담당 워커 (Supervisor 배분용 뷰)
-NEEDS_ROUTER = {k: v["agent"] for k, v in NEEDS_CAPABILITIES.items()}
+# 그래서 워커를 새로 붙이면 — 로스터 프롬프트에 한 줄 설명을 더하는 순간 —
+# needs 상담 대상에도 자동으로 편입된다. ActionAgent 는 아무것도 몰라도 된다.
 
 
 def _model_of(state: _state.AgentState) -> str | None:
@@ -148,27 +124,60 @@ def supervisor_node(state: _state.AgentState, config) -> dict:
     step = state.get("step", 0)
     messages = state.get("messages", []) or []
 
-    # 0) needs-핸드오프 — 요청된 '종류'를 보고 담당 동료를 Supervisor 가 고른다
+    # 0) needs-핸드오프 — ActionAgent 의 상담 요청 처리
     needs = sc.get("needs")
     if needs and not sc.get("needs_result"):
-        kind = needs.get("kind")
-        nxt = NEEDS_ROUTER.get(kind)
+
+        # 0-b) 이미 워커에게 보냈고 답이 돌아온 상태 -> 답변 원문을 메일박스에
+        #      실어 ActionAgent 로 돌려보낸다. 값 추출은 ActionAgent 가
+        #      사용자 답변 읽듯 판독기로 한다 (여기서 파싱하지 않는다).
+        dispatched = needs.get("dispatched_to")
+        if dispatched:
+            helper_msg = member_answered_this_turn(messages, [dispatched])
+            out = dict(sc)
+            if helper_msg:
+                out["needs_result"] = {"text": str(helper_msg.content),
+                                       "by": dispatched}
+                print(f"[NODE] Supervisor: {dispatched} 답변 회수 -> ActionAgent",
+                      flush=True)
+            else:
+                out["needs_result"] = {
+                    "text": None, "by": dispatched,
+                    "note": f"{dispatched} 가 답하지 않았습니다. 직접 입력해 주세요."}
+                print(f"[NODE] Supervisor: {dispatched} 무응답 -> ActionAgent 반송",
+                      flush=True)
+            return {"action": out, "next": "ActionAgent", "step": step + 1}
+
+        # 0-a) 첫 상담 -> 로스터를 보고 도와줄 워커를 고른다 (LLM/규칙).
+        #      워커가 보낼 질의문도 여기서 함께 만든다. ActionAgent 는
+        #      배분에 관여하지 않고, 워커도 needs 를 모른다.
+        d = _agent.needs_dispatch(needs, members,
+                                  config=config, model_name=_model_of(state))
+        nxt = d.get("agent")
 
         if nxt in members:
-            print(f"[NODE] Supervisor: needs({kind}) -> {nxt} "
-                  f"(fill={needs.get('fill')})", flush=True)
+            query = d.get("query") or needs.get("answer") or ""
+            print(f"[NODE] Supervisor: needs 상담 -> {nxt} "
+                  f"(fill={needs.get('fill')}, query='{query}')", flush=True)
             emit(config, "agent_status",
-                 {"agent": "Supervisor", "detail": f"needs 배분 {kind} -> {nxt}"})
-            return {"next": nxt, "step": step + 1}
+                 {"agent": "Supervisor", "detail": f"needs 상담 배분 -> {nxt}"})
+            n2 = dict(needs)
+            n2["dispatched_to"] = nxt
+            out = dict(sc)
+            out["needs"] = n2
+            # 워커는 needs 계약을 모른다. 평소처럼 '이번 사용자 질의' 를 읽어
+            # 일하도록, 조회 질의문을 대화에 실어 준다.
+            return {"action": out,
+                    "messages": [HumanMessage(content=query)],
+                    "next": nxt, "step": step + 1}
 
-        # 처리할 동료가 없다 -> 빈 결과를 채워 ActionAgent 에 돌려보낸다.
-        # (ActionAgent 가 사용자에게 직접 묻는 쪽으로 강등한다)
-        print(f"[NODE] Supervisor: needs({kind}) 담당 에이전트 없음 -> ActionAgent 반송",
+        # 도와줄 워커가 없다 -> 빈 결과로 반송 (ActionAgent 가 직접 질문으로 강등)
+        print("[NODE] Supervisor: needs 상담 — 처리할 워커 없음 -> ActionAgent 반송",
               flush=True)
         out = dict(sc)
         out["needs_result"] = {
-            "value": None, "by": "Supervisor",
-            "note": "해당 조회를 처리할 에이전트가 없습니다. 직접 입력해 주세요.",
+            "text": None, "by": "Supervisor",
+            "note": "이 답변을 해석할 수 있는 에이전트가 없습니다. 직접 입력해 주세요.",
         }
         return {"action": out, "next": "ActionAgent", "step": step + 1}
 
@@ -248,102 +257,17 @@ def supervisor_node(state: _state.AgentState, config) -> dict:
 # 워커 노드들 (목업 스텁)
 # ─────────────────────────────────────────────────────────────────────────
 
-def serve_needs(node_fn, agent_name: str):
-    """기존 워커 노드를 감싸 needs-핸드오프를 대신 처리해 주는 어댑터.
-
-    왜 어댑터인가
-    -------------
-    헬퍼 안에 `if needs["agent"] == "LocationAgent":` 같은 분기를 심으면
-      - 워커가 자기 이름을 자기가 대조하게 되고(누가 부를지는 Supervisor 소관),
-      - 헬퍼마다 같은 보일러플레이트를 복붙해야 하며,
-      - 이미 잘 돌던 사내 에이전트 본문을 건드려야 한다.
-
-    그래서 노드는 그대로 두고 배선 시점에 감싼다.
-
-    하는 일은 둘뿐이다.
-      1) needs 를 그 워커가 평소 받는 형태의 질의로 번역해 넣어준다(ask).
-         핸드오프 재개 때는 사용자의 HITL 답변이 HumanMessage 로 남지 않아
-         대화록만으로는 조회 대상을 알 수 없기 때문이다. 이 번역 메시지는
-         노드에 넘기는 사본에만 넣고 상태로는 돌려주지 않는다.
-      2) 워커가 돌려준 결과에서 값을 꺼내 메일박스를 채운다(pick).
-
-    needs 가 없으면 원본을 그대로 통과시킨다. 사내 이식 시에도 에이전트
-    본문 수정 0 줄이고, 배선에서 감싸고 능력표에 한 줄 추가하면 된다.
-
-    Args:
-        node_fn    : 원본 워커 노드 (동기 함수)
-        agent_name : 메일박스에 남길 처리자 이름
-    """
-    def wrapped(state: _state.AgentState, config, **kwargs) -> dict:
-        sc = state.get("action") or {}
-        needs = sc.get("needs")
-
-        # 평소 모드 — 원본 그대로
-        if not needs or sc.get("needs_result"):
-            return node_fn(state, config, **kwargs) or {}
-
-        spec = NEEDS_CAPABILITIES.get(needs.get("kind")) or {}
-
-        # 1) needs -> 평범한 질의로 번역해서 노드에 넘긴다 (상태에는 안 남긴다)
-        call_state = state
-        ask = spec.get("ask")
-        if ask:
-            try:
-                question = ask(needs)
-                print(f"[NEEDS] {agent_name} 에게 질의 번역: {question!r}", flush=True)
-                call_state = {**state,
-                              "messages": list(state.get("messages") or [])
-                              + [HumanMessage(content=question)]}
-            except Exception as e:
-                print(f"[NEEDS] 질의 번역 실패: {e}", flush=True)
-
-        out = node_fn(call_state, config, **kwargs) or {}
-
-        # 2) 결과에서 값을 꺼내 메일박스를 채운다
-        value = None
-        pick = spec.get("pick")
-        if pick:
-            try:
-                value = pick(out, needs)
-            except Exception as e:          # 헬퍼가 어떻게 실패하든 그래프는 계속
-                print(f"[NEEDS] {agent_name} 값 추출 실패: {e}", flush=True)
-
-        # 실패 사유는 ActionAgent 가 그대로 사용자에게 보여준다.
-        # 무엇을 조회하려다 실패했는지 짚어주고, 직접 입력을 안내한다.
-        if value:
-            note = ""
-        else:
-            target = needs.get("carrier_id")
-            note = (f"{agent_name} 가 {target} 조회에 실패했습니다. 직접 입력해 주세요."
-                    if target else
-                    f"{agent_name} 가 값을 찾지 못했습니다. 직접 입력해 주세요.")
-        print(f"[NEEDS] {agent_name} -> {needs.get('fill')}={value}", flush=True)
-
-        merged = dict(sc)
-        merged.update(out.get("action") or {})   # 원본이 action 을 건드렸으면 얹는다
-        merged["needs_result"] = {"value": value, "by": agent_name, "note": note}
-
-        out = dict(out)
-        out["action"] = merged
-        return out
-
-    wrapped.__name__ = getattr(node_fn, "__name__", "wrapped")
-    return wrapped
-
-
 def location_node(state: _state.AgentState, config, model_name: str = None) -> dict:
     """캐리어 위치 조회.
 
-    needs-핸드오프를 위한 분기는 여기 없다. 배선에서 serve_needs 로 감싸
-    메일박스를 채우므로, 이 노드는 자기 일만 하면 된다.
+    needs-핸드오프 관련 코드는 없다. Supervisor 가 조회 질의문을 대화에
+    실어 보내므로, 이 노드는 평소처럼 '이번 사용자 질의'만 처리하면 된다.
     """
     print("[NODE] LocationAgent entered", flush=True)
     emit(config, "agent_status", {"agent": "LocationAgent", "detail": "위치 조회"})
 
     model = model_name or _model_of(state)
 
-    # needs 로 불려온 경우엔 참조 대상 캐리어도 함께 조회해야 한다.
-    # (발화에 그 캐리어가 들어 있으므로 평소 로직이 그대로 잡아낸다)
     text = last_user_text(state.get("messages", []))
     ids = resolvers.extract_ids(text)
 
@@ -401,7 +325,7 @@ def status_node(state: _state.AgentState, config, model_name: str = None) -> dic
 def log_node(state: _state.AgentState, config, model_name: str = None) -> dict:
     """반송 이력 분석.
 
-    needs-핸드오프 분기는 여기 없다 (배선의 serve_needs 가 처리).
+    needs-핸드오프 관련 코드는 없다 (location_node 와 동일한 이유).
     """
     print("[NODE] LogAgent entered", flush=True)
     emit(config, "agent_status", {"agent": "LogAgent", "detail": "반송 이력 분석"})

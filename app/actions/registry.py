@@ -3,7 +3,7 @@
 새 액션 추가 = ActionSpec 1개 + validate/confirm/execute 툴 3개 작성 후
 ACTION_REGISTRY 에 등록. 서브그래프 배선은 건드릴 필요 없다.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 from app.actions import tools
@@ -18,8 +18,6 @@ class ActionSpec:
     validate: Callable[[dict], dict]
     confirm_text: Callable[[dict], str]
     execute: Callable[[dict], dict]
-    # 파라미터별로 허용되는 참조 해석 종류 (§needs-핸드오프)
-    referencable: dict = field(default_factory=dict)
 
 
 ACTION_REGISTRY: dict[str, ActionSpec] = {
@@ -35,7 +33,6 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         validate=tools.transport_validate_tool,
         confirm_text=tools.transport_confirm_tool,
         execute=tools.transport_execute_tool,
-        referencable={"eqp_id": ["carrier_location", "log_analysis"]},
     ),
     "dest_req": ActionSpec(
         name="dest_req",
@@ -47,7 +44,6 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         validate=tools.dest_req_validate_tool,
         confirm_text=tools.dest_req_confirm_tool,
         execute=tools.dest_req_execute_tool,
-        referencable={},
     ),
 }
 
@@ -59,12 +55,9 @@ ACTION_SELECT_PROMPT = (
     "('반송' 또는 '목적지'라고 답해주세요. 취소하려면 '취소')"
 )
 
-# ── needs-핸드오프에서 ActionAgent 가 아는 것 / 모르는 것 ──────────────────
+# needs-핸드오프에 관해 이 레이어가 아는 것은 없다.
 #
-# ActionAgent 는 "carrier_location 을 해결해 줘" 라고 종류(kind)만 말한다.
-# 그걸 어느 에이전트가 처리하는지는 Supervisor 만 안다(_node.NEEDS_ROUTER).
-#
-# 워커가 동료 워커의 이름을 직접 알면 Supervisor 를 통해 배분한다는 규칙이
-# 깨지고, 에이전트 구성이 바뀔 때마다 액션 레이어까지 고쳐야 한다.
-# 그래서 여기에는 담당자 표를 두지 않는다.
-REFERENCE_KINDS = ("carrier_location", "log_analysis")
+# ActionAgent 는 "내가 이렇게 물었고 / 사용자가 이렇게 답했고 / 이 값이
+# 필요하다" 원문만 Supervisor 에 넘긴다. 참조 종류 분류표도, 담당자 표도
+# 여기 두지 않는다 — 누가 도울 수 있는지는 Supervisor 가 로스터를 보고
+# 판단한다(_agent.needs_dispatch).

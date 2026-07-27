@@ -50,9 +50,12 @@ class ActionScratch(TypedDict, total=False):
     missing: list              # 아직 비어있는 필수 파라미터
     pending_field: str         # 지금 사용자에게 묻고 있는 파라미터
     pending_answer: object     # interrupt resume 로 받은 원본 답변
-    reference: dict            # 참조형 파라미터 {kind, carrier_id, fill}
-    needs: dict                # 동료 에이전트에게 위임한 조회 {agent, fill, query}
-    needs_result: dict         # 헬퍼가 채워주는 메일박스 {value, by, note}
+    consult_text: str          # 값이 간접적으로 실린 것으로 보이는 답변 원문
+    needs: dict                # Supervisor 상담 요청
+                               #   {fill, question, answer, params[, dispatched_to]}
+                               #   dispatched_to 는 Supervisor 가 배분 후 기록
+    needs_result: dict         # 헬퍼 답변 메일박스 {text, by[, note]}
+                               #   text 는 자연어 — 값 추출은 ActionAgent 판독기가
     validation: dict           # {ok, reason, code, bad_fields}
     confirm: str               # "approve" | "reject"
     result: dict               # {job_id, status, payload}

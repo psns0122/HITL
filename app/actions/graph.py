@@ -10,9 +10,16 @@ interrupt 재실행 규칙(핵심):
   노드당 정확히 1개만 둔다. 실제 실행(execute)은 승인 이후에만 도달한다.
 
 needs-핸드오프:
-- 파라미터가 동료 에이전트의 분석/조회를 요구하면(action.needs 설정) interrupt 가
-  아니라 '서브그래프 정상 종료'로 Supervisor 에게 양보하고, 헬퍼가
-  action.needs_result 메일박스를 채워주면 재진입해 param_check 부터 재개한다.
+- 사용자의 답변에 값이 간접적으로 실려 있으면(직접 판독 불가) interrupt 가
+  아니라 '서브그래프 정상 종료'로 Supervisor 에게 상담하러 간다.
+  ActionAgent 가 아는 것은 세 가지뿐이다:
+    · 내가 사용자에게 무엇을 물었는지 (question)
+    · 사용자가 무엇이라 답했는지     (answer — 원문 그대로)
+    · 내가 어떤 값이 필요한지        (fill)
+  동료 에이전트가 누구인지, 무엇을 할 수 있는지는 모른다. 그 판단은
+  Supervisor 가 자기 로스터를 보고 한다. 헬퍼의 답(자연어)이
+  action.needs_result 메일박스로 돌아오면 재진입해서, 사용자 답변을 읽던
+  것과 똑같이 ID 판독기로 읽는다.
 """
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
@@ -61,12 +68,15 @@ def infer_intent_node(state: AgentState, config) -> dict:
         "phase": "param_check",
         "params": {k: v.upper() for k, v in r.params.items()},
         "missing": [],
-        "reference": r.reference,
+        # 발화에 값이 간접적으로 실린 것 같으면(참조 신호) 원문을 들고
+        # Supervisor 상담 후보로 둔다. 누가 풀어줄지는 여기서 모른다.
+        "consult_text": text if r.reference else None,
         "collect_retries": 0,
         "validate_retries": 0,
         "hops": 0,
     }
-    _log("infer_intent", f"-> action={r.action} params={sc['params']} ref={r.reference}")
+    _log("infer_intent", f"-> action={r.action} params={sc['params']} "
+                         f"consult={bool(r.reference)}")
     return {"action": sc}
 
 
@@ -76,20 +86,35 @@ def param_check_node(state: AgentState, config) -> dict:
     _log("param_check", f"enter params={sc.get('params')} needs={sc.get('needs')}")
 
     # 0) 헬퍼가 채워준 메일박스 회수 (needs-핸드오프 복귀 경로)
+    #
+    # 메일박스에는 헬퍼의 '자연어 답변'이 실려 온다. 구조화된 값을 기대하지
+    # 않는다 — 어떤 에이전트가 어떤 형태로 답하는지 ActionAgent 는 모르기
+    # 때문이다. 사용자의 답변을 읽던 것과 똑같이 ID 판독기로 읽는다.
     if sc.get("needs"):
-        res = sc.pop("needs_result", None)
+        res = sc.pop("needs_result", None) or {}
         needs = sc.pop("needs")
+        sc.pop("consult_text", None)
         sc["hops"] = sc.get("hops", 0) + 1
-        if res and res.get("value"):
-            sc["params"][needs["fill"]] = str(res["value"]).upper()
-            sc["reference"] = None
-            _log("param_check", f"헬퍼({res.get('by')}) 결과 흡수: "
-                                f"{needs['fill']}={res['value']}")
+
+        value = None
+        if res.get("text"):
+            ids = _read_ids(res["text"], config)
+            pool = (ids["carrier_ids"] if needs["fill"] == "carrier_id"
+                    else ids["eqp_ids"])
+            # 분석형 답변은 결론(권장값)이 마지막에 오는 경향이 있어
+            # 같은 종류가 여럿이면 마지막 것을 취한다.
+            value = pool[-1] if pool else None
+
+        if value:
+            sc["params"][needs["fill"]] = value.upper()
+            _log("param_check", f"헬퍼({res.get('by')}) 답변에서 판독: "
+                                f"{needs['fill']}={value}")
         else:
-            # 헬퍼 실패 -> 참조 포기, 사용자에게 직접 묻기(HITL 강등)
-            sc["reference"] = None
-            sc["last_parse_error"] = (res or {}).get("note") or \
-                f"{needs.get('agent')} 가 값을 찾지 못했습니다. 직접 입력해 주세요."
+            # 헬퍼가 없거나, 답변에서 값을 못 읽음 -> 사용자에게 직접(HITL 강등).
+            # 상담도 재질문 한 번으로 세어 MAX_COLLECT 안에서 수렴하게 한다.
+            sc["collect_retries"] = sc.get("collect_retries", 0) + 1
+            sc["last_parse_error"] = res.get("note") or \
+                f"{res.get('by', '동료 에이전트')} 답변에서 값을 찾지 못했습니다. 직접 입력해 주세요."
             _log("param_check", f"헬퍼 실패 -> HITL 강등: {sc['last_parse_error']}")
 
     check = param_check_tool(sc.get("action"), sc.get("params", {}))
@@ -99,24 +124,32 @@ def param_check_node(state: AgentState, config) -> dict:
                                "args": {"action": sc.get("action"), "params": sc["params"]},
                                "result": {"missing": sc["missing"]}})
 
-    # 1) 참조형 파라미터 → 동료에게 위임 요청 (needs-핸드오프)
+    # 1) 상담 요청 → Supervisor 에게 (needs-핸드오프)
     #
-    # 여기서는 '무엇이 필요한지'(kind)만 적는다. 누가 처리할지는 Supervisor 가
-    # 정한다 — ActionAgent 는 동료 워커의 이름을 알지 못한다.
-    # 처리할 수 있는 동료가 없으면 Supervisor 가 빈 결과를 채워 돌려보내고,
-    # 그때 아래 0) 회수 분기가 사용자에게 직접 묻는 쪽으로 강등한다.
-    ref = sc.get("reference")
-    if ref and ref.get("fill") in sc["missing"]:
+    # 사용자의 답변(또는 최초 발화)에 필요한 값이 간접적으로 실려 있는데
+    # 판독기로 직접 읽히지 않는 경우다. ActionAgent 가 넘기는 것은
+    # "내가 이렇게 물었고 / 사용자가 이렇게 답했고 / 나는 이 값이 필요하다"
+    # 세 가지 원문뿐이다. 어느 동료가 이걸 풀 수 있는지는 Supervisor 가
+    # 자기 로스터를 보고 정한다. 풀 동료가 없으면 Supervisor 가 빈 결과를
+    # 돌려보내고, 위 0) 회수 분기가 사용자에게 직접 묻는 쪽으로 강등한다.
+    consult = sc.get("consult_text")
+    if consult and sc["missing"]:
         if sc.get("hops", 0) >= cfg.MAX_HOPS:
-            _log("param_check", f"MAX_HOPS({cfg.MAX_HOPS}) 초과 -> 참조 포기, 직접 질문")
-            sc["reference"] = None
+            _log("param_check", f"MAX_HOPS({cfg.MAX_HOPS}) 초과 -> 상담 포기, 직접 질문")
+            sc.pop("consult_text", None)
         else:
-            sc["needs"] = {"fill": ref["fill"], "kind": ref["kind"],
-                           "carrier_id": ref.get("carrier_id"),
-                           "query": last_human_text(state.get("messages", []))}
+            fill = sc["missing"][0]
+            if sc.get("action") and fill != "action":
+                question = ACTION_REGISTRY[sc["action"]].param_prompts.get(fill, "")
+            else:
+                question = ACTION_SELECT_PROMPT
+            sc["needs"] = {"fill": fill, "question": question,
+                           "answer": sc.pop("consult_text"),
+                           "params": dict(sc.get("params") or {})}
             sc["phase"] = "awaiting_helper"
             sc["_route"] = "needs_exit"
-            _log("param_check", f"needs-핸드오프 요청 (kind={ref['kind']}) -> Supervisor 가 배분")
+            _log("param_check", f"Supervisor 상담 요청: fill={fill} "
+                                f"answer='{sc['needs']['answer']}'")
             return {"action": sc}
 
     # 2) 미충족 → 수집 (한 번에 한 파라미터씩 질문)
@@ -220,11 +253,11 @@ def merge_param_node(state: AgentState, config) -> dict:
         _log("merge_param", f"맥락 이탈 -> 재시작: '{r['text']}'")
         return {"action": sc}
 
-    # 참조형 -> needs 핸드오프는 param_check 가 처리
-    if r["kind"] == "reference":
-        sc["reference"] = r["reference"]
+    # 상담형 -> 답변 원문을 들고 param_check 가 Supervisor 상담을 요청한다
+    if r["kind"] == "consult":
+        sc["consult_text"] = r["text"]
         sc["_route"] = "param_check"
-        _log("merge_param", f"참조형 답변 -> {r['reference']}")
+        _log("merge_param", f"상담형 답변 -> '{r['text']}'")
         return {"action": sc}
 
     # 액션 선택 (action 을 묻던 중)
@@ -248,6 +281,16 @@ def merge_param_node(state: AgentState, config) -> dict:
                 sc["params"]["eqp_id"] = ids["eqp_ids"][0]
             sc["_route"] = "param_check"
             _log("merge_param", f"값 인식 -> params={sc['params']}")
+            return {"action": sc}
+
+        # 묻는 종류의 값은 없는데 '다른 종류'의 ID 가 실려 있다
+        # ("carrier 를 물었는데 → 그건 STK101 장비에 있어").
+        # 값을 간접적으로 준 것일 수 있으니 답변 원문을 들고 Supervisor 상담.
+        # 풀어줄 동료가 없으면 빈 메일박스로 돌아와 재질문으로 강등된다.
+        if ids["carrier_ids"] or ids["eqp_ids"]:
+            sc["consult_text"] = r["text"]
+            sc["_route"] = "param_check"
+            _log("merge_param", f"다른 종류 ID 감지 -> Supervisor 상담: '{r['text']}'")
             return {"action": sc}
 
         # 판독기가 값을 못 찾음 -> 재질문.
@@ -451,17 +494,17 @@ def restart_node(state: AgentState, config) -> dict:
 
 
 def needs_exit_node(state: AgentState, config) -> dict:
-    """동료 에이전트에게 양보하며 서브그래프를 '정상 종료'(interrupt 아님).
+    """Supervisor 에게 상담하러 서브그래프를 '정상 종료'(interrupt 아님).
 
-    부모 엣지(ActionAgent -> Supervisor)를 타고 Supervisor 가 needs 를 읽어
-    헬퍼로 라우팅한다.
+    부모 엣지(ActionAgent -> Supervisor)를 타고 Supervisor 가 needs
+    (question/answer/fill 원문)를 읽고 도와줄 워커를 고른다.
     """
     sc = _scratch(state)
-    _log("needs_exit", f"Supervisor 에 양보 -> needs={sc.get('needs')}")
+    _log("needs_exit", f"Supervisor 에 상담 -> needs={sc.get('needs')}")
     emit(config, "agent_status",
          {"agent": "ActionAgent",
-          "detail": f"{sc['needs']['fill']} 조회 위임 요청 "
-                    f"(kind={sc['needs']['kind']}) — 담당은 Supervisor 가 결정"})
+          "detail": f"{sc['needs']['fill']} 값을 사용자 답변에서 못 읽음 "
+                    f"— Supervisor 에 상담"})
     return {"action": sc, "next": "Supervisor"}
 
 

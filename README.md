@@ -239,21 +239,29 @@ async def get_team_graph(model_name=None):
 ```
 "로그 분석해서 원인 장비 피해서 6PDMQ283 반송해줘"
 
- ActionAgent : eqp_id 는 분석이 필요하다고 판단
-               → action.needs = {agent:"LogAgent", fill:"eqp_id"} 기록
-               → interrupt 가 아니라 '정상 종료'로 Supervisor 에 양보
- Supervisor  : needs 감지 → LogAgent 라우팅 (결정적 분기, LLM 판단 불필요)
- LogAgent    : 자기 해석 프롬프트로 분석 → 결과를 facts 에 적재
- Supervisor  : 결과 도착 → ActionAgent 재진입
- ActionAgent : 스크래치 생존 → infer_intent 스킵, param_check 부터 재개
-               → facts 에서 흡수 → 그 파라미터는 사용자에게 묻지 않음 → confirm ⏸
+ ActionAgent : eqp_id 를 사용자 발화에서 직접 못 읽음
+               → action.needs = {question: 내가 물은 것, answer: 사용자 답 원문,
+                                 fill: "eqp_id"} 기록
+               → interrupt 가 아니라 '정상 종료'로 Supervisor 에 상담
+ Supervisor  : 로스터를 보고 "이 답을 풀 수 있는 워커"를 LLM 으로 선정
+               (needs_dispatch) + 그 워커에게 보낼 질의문 작성 → 라우팅
+ LogAgent    : needs 계약을 모르는 평범한 노드. 대화에 실린 질의를 평소처럼
+               처리하고 자연어로 답한다
+ Supervisor  : 워커의 답변 원문을 needs_result 메일박스에 실어 ActionAgent 반환
+ ActionAgent : 스크래치 생존 → param_check 부터 재개
+               → 워커의 답을 사용자 답변 읽듯 ID 판독기로 읽어 파라미터 흡수
+               → 사용자에게 묻지 않고 confirm ⏸
 ```
 
-핵심: **각 에이전트의 해석용 프롬프트는 그 에이전트에 남습니다.** ActionAgent 는 "누가 필요한지"만
-선언하므로 복잡도가 튀지 않습니다. HITL 과 대칭 구조이기도 합니다 —
+핵심: **ActionAgent 는 동료의 이름도, 능력도 모릅니다.** 아는 것은
+(내가 물은 질문 / 사용자의 답 원문 / 필요한 값) 세 가지뿐이고, 배분은
+Supervisor 가 자기 로스터로 판단합니다. 그래서 **워커를 새로 붙이면 배분
+프롬프트에 설명 한 줄 추가하는 것만으로 needs 상담 대상에 자동 편입**됩니다
+(ActionAgent·워커 본문 수정 없음). HITL 과 대칭 구조이기도 합니다 —
 **사람에게 물으면 `interrupt()`, 동료에게 물으면 `needs`.**
 
-가드: `MAX_HOPS` 왕복 상한. 헬퍼가 값을 못 찾으면 **HITL 로 강등**해 사용자에게 직접 묻습니다.
+가드: `MAX_HOPS` 왕복 상한 + 상담 실패도 재질문 1회로 계수(`MAX_COLLECT`).
+도와줄 워커가 없거나 답에서 값을 못 읽으면 **HITL 로 강등**해 사용자에게 직접 묻습니다.
 
 ---
 
@@ -456,7 +464,9 @@ ACTION_REGISTRY["hold_carrier"] = ActionSpec(
    맞춰져 있습니다. 사내 공용 래퍼(`_llm.llm_t1`)가 따로 있으면 그것으로 교체하세요.
 3. `app/actions/mock_db.py` 를 실제 DB 조회로 교체 (함수 시그니처는 그대로 두면 나머지는 무수정)
 4. `app/_node.py` 의 Location/Status/Log/Extract 스텁을 사내 실제 노드로 교체
-   — **`_serve_needs()` 호출만 유지**하면 needs-핸드오프가 그대로 동작합니다
+   — 워커에는 needs 관련 코드가 없으므로 **그냥 갈아끼우면 됩니다.**
+   needs 상담 배분은 Supervisor(`_agent.needs_dispatch` + 로스터 프롬프트)가 하므로,
+   워커를 추가/교체하면 `_prompt.needs_dispatch_prompt` 의 워커 설명만 맞춰 주세요
 5. `requirements.txt` 의 langgraph/langchain-core 버전을 사내 버전에 맞추기 (아래 참고)
 
 ### 버전 (사내 확인 완료)
