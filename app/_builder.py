@@ -26,13 +26,25 @@ from langgraph.graph import END, START, StateGraph
 from app import _node, _state
 from app.actions.graph import build_action_graph
 
+# ── 프로세스 공용 체크포인터 ──────────────────────────────────────────────
+# 그래프는 모델별로 따로 빌드되지만, 체크포인터는 절대 모델별로 나누면 안 된다.
+#
+# HITL 진행 상태는 thread_id 에 달려 있지 모델에 달려 있지 않다. 모델마다
+# 체크포인터를 따로 두면, 사용자가 승인 대기 중에 프론트에서 모델을 바꾸는
+# 순간 그 답변이 '그 스레드를 본 적 없는' 체크포인터로 가서 신규 질문으로
+# 오인되고, 원래 인터럽트는 영영 고아가 된다.
+# -> 하나를 공유해서 모델을 바꿔도 같은 스레드가 이어지게 한다.
+SHARED_CHECKPOINTER = InMemorySaver()   # (구)MemorySaver — langgraph 1.x 표준명
 
-def build_team_graph(model_name: str = None):
+
+def build_team_graph(model_name: str = None, checkpointer=None):
     """그래프와 체크포인터를 만들어 돌려준다.
 
     Args:
         model_name: 프론트에서 고른 모델. 노드가 partial 로 받아 쓴다.
                     (실행 시점에는 state["model_name"] 이 우선한다)
+        checkpointer: 쓸 체크포인터. None 이면 프로세스 공용 것을 쓴다.
+                      테스트에서 스레드 상태를 격리하고 싶을 때만 따로 넘긴다.
     """
     workflow = StateGraph(_state.AgentState)
 
@@ -89,7 +101,7 @@ def build_team_graph(model_name: str = None):
     workflow.add_edge("FinalGeneralAgent", END)
 
     # HITL 은 체크포인터가 있어야 동작한다 (interrupt 후 재개)
-    checkpointer = InMemorySaver()   # (구)MemorySaver — langgraph 1.x 표준명
+    checkpointer = checkpointer or SHARED_CHECKPOINTER
     graph = workflow.compile(checkpointer=checkpointer)
 
     return graph, checkpointer

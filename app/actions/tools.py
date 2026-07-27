@@ -11,6 +11,46 @@ def _log(tool: str, msg: str):
     print(f"[TOOL {tool}] {msg}", flush=True)
 
 
+# ── 0. ID 판독기 ─────────────────────────────────────────────────────────
+
+def id_lookup_tool(candidates: list) -> dict:
+    """★ ID 판독기 — 후보 토큰들이 실제로 무엇인지 조회해서 종류를 정한다.
+
+    ★★ 사내 반입 시 이 함수 본문만 사내 조회 코드로 갈아끼우면 된다. ★★
+       (여기서는 mock_db 로 땡 처리. 인터페이스는 그대로 유지한다.)
+
+    설계 의도
+    ---------
+    캐리어/장비 ID 형식은 항상 정형화돼 있지 않다. 그래서 "8자 영숫자면
+    캐리어" 같은 정규식으로 종류를 판정하면, 형식이 조금만 달라도 실제로
+    존재하는 ID 를 못 알아보고 버린다.
+
+    그래서 규칙을 뒤집는다.
+      - 발화에서 ID '스러운' 토큰은 형식을 따지지 말고 전부 후보로 올리고,
+      - 그게 캐리어인지 장비인지 아무것도 아닌지는 **판독기가 조회해서** 정한다.
+
+    즉 유효성의 권한은 정규식이 아니라 이 함수에 있다.
+
+    Returns:
+        {"carrier_ids": [...], "eqp_ids": [...], "unknown": [...]}
+        unknown = 후보로는 올라왔지만 조회에 걸리지 않은 것들.
+                  (사용자에게 되물을 때 근거로 쓴다)
+    """
+    carrier_ids, eqp_ids, unknown = [], [], []
+
+    for cand in candidates or []:
+        if mock_db.get_carrier(cand):
+            carrier_ids.append(cand)
+        elif mock_db.get_equipment(cand):
+            eqp_ids.append(cand)
+        else:
+            unknown.append(cand)
+
+    _log("id_lookup", f"후보={list(candidates or [])} -> carrier={carrier_ids} "
+                      f"eqp={eqp_ids} unknown={unknown}")
+    return {"carrier_ids": carrier_ids, "eqp_ids": eqp_ids, "unknown": unknown}
+
+
 # ── 1. (공용) param_check_tool ────────────────────────────────────────────
 
 def param_check_tool(action: str | None, params: dict) -> dict:

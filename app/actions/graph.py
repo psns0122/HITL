@@ -24,7 +24,7 @@ from app._state import AgentState
 from app._util import emit, last_human_text
 from app.actions import resolvers
 from app.actions.registry import ACTION_REGISTRY, ACTION_SELECT_PROMPT, REFERENCE_AGENT
-from app.actions.tools import param_check_tool
+from app.actions.tools import id_lookup_tool, param_check_tool
 
 # 진행 중으로 취급하는 phase (재진입 판정 기준)
 ACTIVE_PHASES = {"param_check", "collecting", "awaiting_helper", "validating", "confirming"}
@@ -167,19 +167,24 @@ def collect_param_node(state: AgentState, config) -> dict:
 
 
 def _read_ids(text: str, config) -> dict:
-    """ID 판독기(툴). 발화에서 캐리어/장비 ID 를 인식·검증한다.
+    """ID 판독기 호출. 발화에서 캐리어/장비 ID 를 인식한다.
 
-    ★ 실무 교체 지점: 지금은 정규식(resolvers.extract_ids)이지만, 캐리어 ID 형식이
-      항상 정형화돼 있지 않으므로 실제로는 DB 를 보는 툴로 바꿔야 한다.
-      여기 한 곳만 바꾸면 infer_intent·merge_param·ExtractAgent 가 모두 따라온다.
+    두 단계로 나뉜다.
+      1) id_candidates : ID 스러운 토큰을 형식 안 따지고 전부 후보로 (느슨)
+      2) id_lookup_tool: 그게 캐리어인지 장비인지 아무것도 아닌지 조회 (권한)
 
-    트레이스에 입력(text)과 결과(ids)를 남긴다(항목 10).
+    ★ 실무 교체 지점은 tools.id_lookup_tool 본문 한 곳이다.
+      여기 인터페이스는 그대로 두고 그 함수만 사내 조회로 바꾸면
+      infer_intent·merge_param·ExtractAgent 가 모두 따라온다.
+
+    트레이스에 입력(text/후보)과 결과(ids)를 남긴다.
     """
-    ids = resolvers.extract_ids(text)
+    cands = resolvers.id_candidates(text)
+    ids = id_lookup_tool(cands)
     emit(config, "tool_call", {
         "agent": "ActionAgent",
-        "tool": "params_extract_tool",     # ID 판독기
-        "args": {"text": text},
+        "tool": "id_lookup_tool",          # ID 판독기
+        "args": {"text": text, "candidates": cands},
         "result": ids,
     })
     return ids
@@ -241,11 +246,17 @@ def merge_param_node(state: AgentState, config) -> dict:
             _log("merge_param", f"값 인식 -> params={sc['params']}")
             return {"action": sc}
 
-        # 판독기가 유효한 값을 못 찾음 -> 재질문
+        # 판독기가 값을 못 찾음 -> 재질문.
+        # 후보로는 올라왔는데 조회에 안 걸린 경우엔 그 토큰을 짚어준다.
         sc["collect_retries"] = sc.get("collect_retries", 0) + 1
-        sc["last_parse_error"] = f"입력하신 값에서 유효한 {fieldname} 를 찾지 못했습니다."
+        if ids["unknown"]:
+            sc["last_parse_error"] = (
+                f"'{', '.join(ids['unknown'])}' 은(는) 조회되지 않는 ID 입니다.")
+        else:
+            sc["last_parse_error"] = f"입력하신 값에서 {fieldname} 를 찾지 못했습니다."
         sc["_route"] = "param_check"
-        _log("merge_param", f"값 인식 실패(재시도 {sc['collect_retries']})")
+        _log("merge_param", f"값 인식 실패(재시도 {sc['collect_retries']}): "
+                            f"unknown={ids['unknown']}")
         return {"action": sc}
 
     # empty
@@ -305,13 +316,60 @@ def confirm_node(state: AgentState, config) -> dict:
         "options": ["승인", "거절"],
     })
 
-    verdict = resolvers.detect_confirm(decision)
+    verdict = resolvers.detect_confirm_verdict(decision)
     _log("confirm", f"resume decision={decision!r} -> {verdict}")
     sc["confirm"] = verdict
-    sc["phase"] = "executing" if verdict == "approve" else "abandoned"
-    if verdict != "approve":
+
+    # 승인 — 유일하게 execute 로 가는 길
+    if verdict == "approve":
+        sc["phase"] = "executing"
+        sc["_route"] = "execute"
+        return {"action": sc}
+
+    # 명시적 거절 — 종료
+    if verdict == "reject":
+        sc["phase"] = "abandoned"
         sc["abandon_reason"] = "사용자가 실행을 거절해 명령을 종료합니다."
-    sc["_route"] = "execute" if verdict == "approve" else "abandon"
+        sc["_route"] = "abandon"
+        return {"action": sc}
+
+    # 판정 불가 — 승인/거절이 아니라 '파라미터를 고치려는 답변'일 수 있다.
+    # 여기서 바로 접어버리면 그때까지 수집한 값이 통째로 날아가므로,
+    # ID 후보가 실려 있으면 수집 루프로 되돌린다. (confirm 재질문이 아니라
+    # 기존 param_check -> collect -> validate 경로를 그대로 다시 탄다)
+    cands = resolvers.id_candidates(str(decision))
+    if not cands:
+        sc["phase"] = "abandoned"
+        sc["abandon_reason"] = "승인 여부를 확인하지 못해 명령을 종료합니다."
+        sc["_route"] = "abandon"
+        _log("confirm", "판정 불가 + ID 후보 없음 -> abandon")
+        return {"action": sc}
+
+    ids = id_lookup_tool(cands)
+    emit(config, "tool_call", {"agent": "ActionAgent", "tool": "id_lookup_tool",
+                               "args": {"text": str(decision), "candidates": cands},
+                               "result": ids})
+
+    if ids["carrier_ids"] or ids["eqp_ids"]:
+        # 조회되는 ID 를 줬다 -> 해당 파라미터만 교체하고 다시 검증·승인
+        if ids["carrier_ids"]:
+            sc["params"]["carrier_id"] = ids["carrier_ids"][0]
+        if ids["eqp_ids"]:
+            sc["params"]["eqp_id"] = ids["eqp_ids"][0]
+        _log("confirm", f"파라미터 정정 -> params={sc['params']}")
+    else:
+        # 고치려 한 건 분명한데 조회가 안 되는 ID -> 그 자리만 비우고 다시 묻는다.
+        # 어느 파라미터를 고치려는지 모를 땐 마지막 필수 파라미터로 본다
+        # (transport 면 목적지 eqp_id — '바꿔줘'는 대개 목적지를 가리킨다).
+        spec = ACTION_REGISTRY[sc["action"]]
+        target = spec.required_params[-1]
+        sc["params"].pop(target, None)
+        sc["last_parse_error"] = (
+            f"'{', '.join(ids['unknown'])}' 은(는) 조회되지 않는 ID 입니다.")
+        _log("confirm", f"정정 실패 -> {target} 비우고 재수집 (unknown={ids['unknown']})")
+
+    sc["phase"] = "param_check"
+    sc["_route"] = "param_check"
     return {"action": sc}
 
 
@@ -439,8 +497,10 @@ def build_action_graph():
     g.add_conditional_edges("validate", _route,
                             {"confirm": "confirm", "param_check": "param_check",
                              "abandon": "abandon"})
+    # confirm 은 승인/거절 외에 '파라미터 정정' 으로 수집 루프에 되돌아갈 수 있다
     g.add_conditional_edges("confirm", _route,
-                            {"execute": "execute", "abandon": "abandon"})
+                            {"execute": "execute", "abandon": "abandon",
+                             "param_check": "param_check"})
     g.add_edge("execute", "finalize")
     g.add_edge("finalize", END)
     g.add_edge("abandon", END)

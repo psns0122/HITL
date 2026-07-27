@@ -23,6 +23,9 @@ MOCK_DB = {
         "3KWQ7712": {"status": "TRANSFERRING", "current_eqp": "PHT201", "lot": "LOT-B456"},
         "9ZXCV456": {"status": "IDLE",         "current_eqp": "STK102", "lot": "LOT-C789"},
         "7HITL001": {"status": "IDLE",         "current_eqp": "PHT201", "lot": "LOT-D012"},
+        # 형식이 다른 캐리어. 구 정규식(8자 영숫자)으로는 절대 안 잡히던 형태다.
+        # ID 판독기가 형식이 아니라 조회로 종류를 정한다는 걸 확인하는 회귀 방지용.
+        "TESTCAR0001": {"status": "IDLE",      "current_eqp": "STK101", "lot": "LOT-E345"},
     },
     # eqp_id -> 장비 정보
     "equipment": {
@@ -32,10 +35,12 @@ MOCK_DB = {
         "ETC301": {"type": "ETCH",    "online": True},
         "CLN501": {"type": "CLEAN",   "online": True},
         "DFF401": {"type": "DIFF",    "online": False},   # 오프라인 → 반송 목적지로 부적합
+        # 형식이 다른 장비(구 정규식은 영문3+숫자3만 인정했다). 위와 같은 목적.
+        "STOCKER9": {"type": "STOCKER", "online": True},
     },
     # from_eqp -> 도달 가능한 목적지 목록
     "reachable": {
-        "STK101": ["PHT201", "ETC301", "STK102", "CLN501"],
+        "STK101": ["PHT201", "ETC301", "STK102", "CLN501", "STOCKER9"],
         "STK102": ["STK101", "PHT201", "CLN501"],
         "PHT201": ["STK101", "STK102", "ETC301"],
         "ETC301": ["STK101", "PHT201"],
