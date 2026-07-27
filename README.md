@@ -27,7 +27,11 @@ streamlit run streamlit_app.py
 ```bash
 python3 tests/test_hitl_scenarios.py   # 그래프 레벨 HITL 시나리오 12종
 python3 tests/test_api_sse.py          # SSE API E2E (신규턴/재개/중단/로그)
+python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실제 서버 왕복)
 ```
+
+> 셋 다 `FAKE_LLM=1` 로 돌아가므로 사내 LLM endpoint 없이 검증됩니다.
+> `FAKE_LLM=0`(실제 LLM) 경로는 사내에서 한 번 확인해 주세요.
 
 데모 노트북: `notebooks/hitl_demo.ipynb` (셀을 위에서부터 실행)
 
