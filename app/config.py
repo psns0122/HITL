@@ -43,7 +43,7 @@ GATEWAY_BASE_URL = _get("LLM_GATEWAY_BASE_URL", "http://hcp.llm.skhynix.com/v1",
 # 사내 게이트웨이는 키를 요구하지 않으므로 빈 값 허용
 # (OpenAI SDK 가 빈 키를 거부해서 _llm.py 에서 'EMPTY' 로 대체한다)
 GATEWAY_API_KEY = _get("LLM_GATEWAY_API_KEY", "", "OPENAI_API_KEY")
-CHAT_MODEL = _get("LLM_CHAT_MODEL", "glm-5.1", "MODEL_NAME")
+CHAT_MODEL = _get("LLM_CHAT_MODEL", "GaiA-LLM-Latest", "MODEL_NAME")
 TEMPERATURE = float(_get("TEMPERATURE", "0"))
 MAX_TOKENS = int(_get("LLM_MAX_TOKENS", "4000"))
 LLM_TIMEOUT = int(_get("LLM_TIMEOUT", "120"))
