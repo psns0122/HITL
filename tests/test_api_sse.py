@@ -200,12 +200,6 @@ async def main():
         assert ni["params"]["carrier_id"] == "9ZXCV456", ni
         print("12) 맥락 이탈 재시작 PASS")
 
-        # ── 13) 헬스체크에 동시성/유량 정보
-        h = (await client.get(f"{BASE}/health")).json()
-        assert "concurrency" in h and "max_concurrent" in h["concurrency"], h
-        assert "rate_limit_per_min" in h, h
-        print(f"13) concurrency/rate 노출 PASS ({h['concurrency']})")
-
     print("\nALL API TESTS PASS")
 
 
