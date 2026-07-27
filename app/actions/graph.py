@@ -227,7 +227,7 @@ def action_node(state: AgentState, config) -> dict:
             _log("collect_param", f"answer #{interrupt_no} = {answer!r}")
 
             # ── 3-a. 답변 판정: 취소 / 참조(needs) / 맥락이탈(재시작) / 액션 / 값 / 재질문
-            r = resolvers.classify_collect_answer(fieldname, answer, sc.get("action"))
+            r = resolvers.resolve_param_answer(fieldname, answer, sc.get("action"))
 
             if r["kind"] == "cancel":
                 sc["abandon_reason"] = "사용자 요청으로 명령을 취소했습니다."

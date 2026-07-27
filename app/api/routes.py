@@ -282,9 +282,10 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
     printed_any = False          # 최종 토큰을 하나라도 내보냈는지
     stopped = False              # 사용자 중단 플래그
 
-    # 동시 실행 슬롯을 잡는다. 넘치면 여기서 순서대로 대기한다(거절 아님).
+    # 동시 실행 슬롯을 잡는다. 사용자(thread)별 슬롯이라 남의 작업이 내 걸 안 막는다.
+    # 자기 상한을 넘겨 요청하면 '자기 자신'만 대기한다(거절 아님).
     slot_wait_start = time.time()
-    async with limits.concurrency_slot():
+    async with limits.concurrency_slot(thread_id):
         waited = time.time() - slot_wait_start
         if waited > 0.5:
             yield _event({"type": "agent_status", "agent": "system",

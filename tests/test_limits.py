@@ -27,31 +27,58 @@ def test_rate_limit():
     print("rate_limit PASS")
 
 
-async def test_concurrency():
-    """동시성 세마포어가 슬롯 수를 제한하는지."""
+async def test_global_concurrency():
+    """전역 세마포어가 전체 동시 실행 수를 상한 이하로 유지하는지."""
     from app.api import limits
 
+    # 여러 사용자가 동시에 몰려도 전역 상한을 넘지 않아야 한다
     order = []
 
-    async def worker(i):
-        async with limits.concurrency_slot():
-            order.append(("in", i))
+    async def worker(user, i):
+        async with limits.concurrency_slot(f"user-{user}"):
+            order.append(("in", user, i))
             await asyncio.sleep(0.05)
-            order.append(("out", i))
+            order.append(("out", user, i))
 
-    # MAX_CONCURRENT 개까지만 동시에 in 상태여야 한다
-    await asyncio.gather(*[worker(i) for i in range(cfg.MAX_CONCURRENT + 3)])
+    # 사용자 여러 명이 각자 여러 번 (전역 상한보다 훨씬 많게)
+    tasks = [worker(u, i) for u in range(cfg.MAX_CONCURRENT + 4) for i in range(2)]
+    await asyncio.gather(*tasks)
 
-    # 임의 시점의 동시 in 개수가 상한을 넘지 않았는지 재구성해 확인
     live, peak = 0, 0
-    for kind, _ in order:
+    for kind, *_ in order:
         live += 1 if kind == "in" else -1
         peak = max(peak, live)
     assert peak <= cfg.MAX_CONCURRENT, f"peak={peak} > {cfg.MAX_CONCURRENT}"
-    print(f"concurrency PASS (peak={peak}, max={cfg.MAX_CONCURRENT})")
+    print(f"global concurrency PASS (peak={peak}, max={cfg.MAX_CONCURRENT})")
+
+
+async def test_fairness():
+    """한 사용자가 자기 상한을 넘게 요청해도, 다른 사용자는 안 기다리는지(공정성)."""
+    from app.api import limits
+
+    started_at = {}
+
+    async def heavy(user, i, dur):
+        async with limits.concurrency_slot(user):
+            started_at.setdefault(user, []).append(asyncio.get_event_loop().time())
+            await asyncio.sleep(dur)
+
+    # A: 자기 상한(+2)을 넘겨 긴 작업을 잔뜩 던진다 -> A 는 자기들끼리 대기
+    # B: 나중에 가벼운 요청 하나 -> A 뒤에서 안 기다리고 바로 시작돼야 한다
+    t0 = asyncio.get_event_loop().time()
+    a_tasks = [heavy("A", i, 0.2) for i in range(cfg.MAX_CONCURRENT_PER_USER + 3)]
+    await asyncio.sleep(0.02)                 # A 가 먼저 자리 잡게
+    b_task = heavy("B", 0, 0.01)
+    await asyncio.gather(*a_tasks, b_task)
+
+    b_start = started_at["B"][0] - t0
+    # B 는 A 의 긴 작업들이 끝나길 기다리지 않고 0.1s 안에 시작돼야 한다
+    assert b_start < 0.1, f"B 가 {b_start:.2f}s 나 기다림 (공정성 실패)"
+    print(f"fairness PASS (B 시작 {b_start*1000:.0f}ms — A 뒤에서 안 기다림)")
 
 
 if __name__ == "__main__":
     test_rate_limit()
-    asyncio.run(test_concurrency())
+    asyncio.run(test_global_concurrency())
+    asyncio.run(test_fairness())
     print("\nALL LIMIT TESTS PASS")
