@@ -371,17 +371,23 @@ ACTION_REGISTRY["hold_carrier"] = ActionSpec(
    — **`_serve_needs()` 호출만 유지**하면 needs-핸드오프가 그대로 동작합니다
 5. `requirements.txt` 의 langgraph/langchain-core 버전을 사내 버전에 맞추기 (아래 참고)
 
-### 버전 확인 요청
+### 버전 (사내 확인 완료)
 
-LangGraph 는 `interrupt()`/`Command`/`StateSnapshot.interrupts` API 가 버전마다 달라 민감합니다.
-아래 사내 실제 버전을 알려주시면 그에 맞춰 조정하겠습니다.
+사내 실제 버전과 개발·검증 환경이 **동일**합니다. 별도 조정이 필요 없습니다.
 
-- `langgraph`, `langgraph-checkpoint`
-- `langchain-core`
-- `langchain-openai` (또는 사내 LLM 래퍼 방식)
-- `pydantic` (v1/v2)
-- `fastapi`, `uvicorn`, `streamlit`
+| 패키지 | 사내 | 검증 |
+|---|---|---|
+| `langgraph` | 1.1.2 | 1.1.2 ✅ |
+| `langchain-core` | 1.4.9 | 1.4.9 ✅ |
+| `langchain-openai` | 1.1.8 | 1.1.8 ✅ |
+| `pydantic` | 2.12.5 | 2.12.5 ✅ |
 
-현재 코드는 버전 관용적으로 작성돼 있습니다 — 인터럽트 감지는 `StateSnapshot.interrupts` 를
-먼저 보고 없으면 `tasks[].interrupts` 로 폴백하며, 체크포인터는 `InMemorySaver`(구 `MemorySaver`)
-이름만 바꾸면 구버전에서도 동작합니다.
+`requirements.txt` 는 위 4개를 **정확히 고정(`==`)** 합니다. LangGraph 는
+`interrupt()`/`Command`/`StateSnapshot.interrupts` API 가 버전마다 달라, 올리면 HITL 재개가
+깨질 수 있어서입니다. 나머지(fastapi/uvicorn/streamlit/httpx/python-dotenv)는 사내
+`pptx-vision-rag` 와 같은 `>=` 하한 방식으로 두었습니다.
+
+> 이 환경에서 `pip install -r requirements.txt` 는 아무것도 바꾸지 않습니다(전부 already satisfied).
+
+버전이 확정됐지만 방어 코드는 그대로 둡니다 — 인터럽트 감지는 `StateSnapshot.interrupts` 를
+먼저 보고 없으면 `tasks[].interrupts` 로 폴백하므로, 나중에 사내가 구버전으로 내려가도 동작합니다.
