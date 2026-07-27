@@ -59,7 +59,7 @@ python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실
                  │  (배분)     │  ├─ StatusAgent ───┤
                  └─────┬──────┘  ├─ ExtractAgent ──┤──▶ (each) ──▶ Supervisor
                        │         ├─ LogAgent ──────┤
-                       │         └─ ActionAgent ★ ─┘   ← HITL 서브그래프
+                       │         └─ ActionAgent ★ ─┘   ← 턴 기반 HITL (단일 노드)
                        │ FINISH / FinalAnswerAgent
                        ▼
                  ┌──────────────────┐
@@ -67,10 +67,14 @@ python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실
                  └──────────────────┘
 ```
 
-### ActionAgent 내부 (⏸ = 질문 남기고 턴 종료)
+### ActionAgent 내부 논리 흐름 (⏸ = 질문 남기고 턴 종료)
+
+> 아래는 **논리 단계**입니다. 구현은 `app/actions/graph.py` 의 노드 함수
+> **하나**(action_node)이며, 단계들은 함수 안의 분기/루프입니다.
+> 턴 기반은 interrupt 재실행 격리가 필요 없어 서브그래프로 쪼갤 이유가 없습니다.
 
 ```
- Supervisor ──▶ [ActionAgent 서브그래프]
+ Supervisor ──▶ [ActionAgent 단일 노드]
         ▼
    ┌────────────┐  entry: 답변 소비 / 복귀 / 신규 판정 (턴 기반의 관제탑)
    │action_entry│
@@ -117,7 +121,7 @@ Router/Supervisor 를 우회하게 되어, 이 불변식과 양립할 수 없습
 그래서 HITL 을 턴 기반 상태 기계로 구현합니다:
 
 1. **질문 = 턴의 정상 종료.** 사용자에게 물을 게 생기면 질문 payload 를
-   `action.awaiting` 에 싣고 서브그래프를 끝낸다(`ask_param`/`ask_confirm`).
+   `action.awaiting` 에 싣고 노드를 정상 종료한다(질문을 남기고 턴을 닫는다).
    Supervisor 가 awaiting 을 보고 턴을 닫는다 (FinalAnswer 없이 END).
 2. **답변 = 새 턴.** 사용자의 답은 신규 질문과 똑같이
    `{"messages":[HumanMessage(...)]}` 로 들어온다. Router 가 진행 중 액션을
@@ -369,7 +373,7 @@ app/
 │   ├── registry.py      #   ActionSpec + ACTION_REGISTRY ← 액션 추가 지점
 │   ├── resolvers.py     #   답변 해석 4분기 / 승인 판정
 │   ├── tools.py         #   param_check / validate / confirm / execute
-│   └── graph.py         #   HITL 서브그래프
+│   └── graph.py         #   턴 기반 HITL 단일 노드 (action_node)
 └── api/
     ├── main.py          # FastAPI 엔트리 (lifespan: MCP connect/disconnect)
     ├── routes.py        # /chat/stream, /chat/stop, /models, 일별 jsonl 로그
@@ -389,7 +393,7 @@ app/
 | LocationAgent | `location_search_tool` |
 | LogAgent | `log_search_tool` |
 | ExtractAgent | `fab_extract_tool`, `params_extract_tool` |
-| ActionAgent | (HITL 서브그래프가 직접 호출 — `actions/tools.py`) |
+| ActionAgent | (단일 노드가 직접 호출 — `actions/tools.py`, `id_reader.py`) |
 
 모든 툴은 `disable_tool_caching()` 을 거칩니다. 설비/캐리어 상태는 계속 바뀌므로
 같은 질문이라도 매번 실제 DB 를 봐야 하기 때문입니다.
@@ -419,7 +423,7 @@ ExtractAgent 는 답변을 내는 워커가 아니라 **뒤 단계가 쓸 ID 재
 ### 액션 추가하기
 
 `app/actions/registry.py` 에 `ActionSpec` 한 개를 추가하고 툴 3개(validate/confirm/execute)를
-쓰면 끝입니다. 서브그래프 배선은 건드릴 필요 없습니다.
+쓰면 끝입니다. 그래프 배선은 건드릴 필요 없습니다.
 
 ```python
 ACTION_REGISTRY["hold_carrier"] = ActionSpec(
@@ -501,7 +505,7 @@ ACTION_REGISTRY["hold_carrier"] = ActionSpec(
 > 사내에서 이미 1.0.9+ 가 깔려 있다면 `pip install langgraph-prebuilt==1.0.8` 로 내려야 합니다.
 
 `requirements.txt` 는 위 버전들을 **정확히 고정(`==`)** 합니다. (턴 기반 전환으로
-interrupt API 의존은 사라졌지만, 체크포인터/서브그래프 동작도 버전을 타므로 고정은 유지합니다.) 나머지(fastapi/uvicorn/streamlit/httpx/python-dotenv)는 사내
+interrupt API 의존은 사라졌지만, 체크포인터 동작도 버전을 타므로 고정은 유지합니다.) 나머지(fastapi/uvicorn/streamlit/httpx/python-dotenv)는 사내
 `pptx-vision-rag` 와 같은 `>=` 하한 방식으로 두었습니다.
 
 > 이 환경에서 `pip install -r requirements.txt` 는 아무것도 바꾸지 않습니다(전부 already satisfied).
