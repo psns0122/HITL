@@ -340,7 +340,7 @@ ACTION_REGISTRY["hold_carrier"] = ActionSpec(
    FAKE_LLM=0
    LLM_GATEWAY_BASE_URL=http://hcp.llm.skhynix.com/v1
    LLM_GATEWAY_API_KEY=            # 사내 게이트웨이는 키 불필요 → 비워둠
-   LLM_CHAT_MODEL=glm-5.1
+   LLM_CHAT_MODEL=GaiA-LLM-Latest
    LOG_DIR=./devLogs
    ```
    (구 이름 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`MODEL_NAME` 도 폴백으로 인식합니다.)
