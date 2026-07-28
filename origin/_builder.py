@@ -57,11 +57,10 @@ def build_team_graph(checkpointer=None):
 
     workflow.add_edge(START, "Router")
 
-    # Router -> 일반 / 업무
-    # Router 는 next 에 노드 이름이 아니라 route 값을 담아 준다
+    # Router -> 일반 / 업무 (router_node 가 next 에 노드 이름을 담아 준다)
     router_conditional_map = {
-        "supervisor": "Supervisor",
-        "general": "GeneralAgent",
+        "Supervisor": "Supervisor",
+        "GeneralAgent": "GeneralAgent",
     }
     workflow.add_conditional_edges("Router", lambda s: s["next"], router_conditional_map)
 

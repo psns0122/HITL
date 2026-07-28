@@ -196,11 +196,6 @@ async def log_node(state: _state.AgentState) -> _state.AgentState:
 
 
 async def action_node(state: _state.AgentState) -> _state.AgentState:
-    """명령 실행.
-
-    원본은 다른 워커와 구분되는 점이 하나도 없다 — 파라미터가 없어도 되묻지
-    않고, 실행 전에 승인을 받지도 않는다. 이 노드가 이번 작업의 교체 대상이다.
-    """
     try:
         agent = _agent.create_action_agent(model_name=state.get("model_name"))
         return await _util.agent_node(state, agent, "ActionAgent")
@@ -220,42 +215,69 @@ async def action_node(state: _state.AgentState) -> _state.AgentState:
 async def router_node(state: _state.AgentState) -> _state.AgentState:
     """일반 질의면 GeneralAgent, 업무 질의면 Supervisor 로 보낸다.
 
-    이 노드는 판단하지 않는다. _agent.router_agent 가 route / handoff / next
-    를 다 채워서 주고, 여기서는 step 만 얹는다.
-    next 에는 노드 이름이 아니라 route 값("general"/"supervisor")이 들어간다.
+    _agent.router_agent 가 route 를 판단하고, 노드가 그 값을 노드 이름으로
+    바꿔 next 에 싣는다.
     """
+    messages = state.get("messages", []) or []
+    if messages and isinstance(messages[-1], HumanMessage):
+        print(f"[USER] {messages[-1].content}")
+
     print("[NODE] Router entered")
 
-    try:
-        result = await _agent.router_agent(state)
-        return {**result, "step": 1}
+    result = await _agent.router_agent({
+        "messages": state["messages"],
+        "model_name": state["model_name"],
+    })
 
-    except Exception as e:
-        # 판단이 안 되면 supervisor 로 보낸다 — 조회를 놓치는 것보다
-        # 불필요하게 조회하는 편이 낫다.
-        print(f"[ERROR] Failed to execute Router: {e}")
-        return {"route": "supervisor", "handoff": True, "next": "supervisor", "step": 1}
+    route = result.get("route", "supervisor")
+    if route == "supervisor":
+        next_node = "Supervisor"
+    else:
+        next_node = "GeneralAgent"
+
+    return {"route": route, "handoff": False, "next": next_node, "step": 1}
 
 
 async def general_node(state: _state.AgentState) -> _state.AgentState:
-    """일반 대화. 업무 질의로 재판정되면 Supervisor 로 handoff 한다.
+    """일반 대화. 업무 질의로 재판정되면 Supervisor 로 handoff 한다."""
+    print("[NODE] General entered")
 
-    GeneralAgent 는 react agent 가 아니라서 _util.agent_node 를 쓰지 않는다.
-    (_agent.build_general_agent 가 만든 함수를 직접 부른다)
-    """
-    try:
-        result = await _agent.general_agent(state)
+    input_messages = state.get("messages", []) or []
+    q = _util.last_user_text(state)
 
-        next_node = "Supervisor" if result.get("handoff") else "FINISH"
-        return {**result, "next": next_node, "step": state.get("step", 0) + 1}
+    # 세이프티 핸드오프 재판정
+    route2 = await _agent.classify_route_with_llm(q)
 
-    except Exception as e:
-        print(f"[ERROR] Failed to execute GeneralAgent: {e}")
+    if route2 == "supervisor":
         return {
-            "messages": [AIMessage(content="GeneralAgent 초기화/실행 중 오류가 발생했습니다.")],
-            "next": "FINISH",
+            "messages": [],
+            "handoff": True,
+            "route": "supervisor",
+            "next": "Supervisor",
             "step": state.get("step", 0) + 1,
         }
+
+    # 일반 대화 확정 -> react agent(툴 포함)로 답변 생성
+    general_agent = _agent.create_general_agent(model_name=state.get("model_name"))
+
+    result = general_agent.invoke({"messages": state["messages"]})
+
+    result_messages = result.get("messages", []) or []
+
+    # 이번 호출로 새로 늘어난 메시지만 잘라낸다
+    prev_len = len(input_messages)
+    new_messages = result_messages[prev_len:]
+
+    if not new_messages and result_messages:
+        new_messages = result_messages
+
+    return {
+        "messages": new_messages,
+        "handoff": False,
+        "route": "general",
+        "next": "FINISH",
+        "step": state.get("step", 0) + 1,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────
