@@ -81,10 +81,6 @@ def last_user_text(source) -> str:
     return ""
 
 
-# 사내 코드에서 쓰던 이름 (동일 동작)
-last_human_text = last_user_text
-
-
 def agent_name_of(msg) -> str | None:
     """메시지를 만든 에이전트 이름.
 
@@ -572,6 +568,191 @@ needs-핸드오프
 
     # ─────────────────────────────────────────────────────────────────────────
     # 본체 — ActionAgent 전 과정을 하나의 노드에서 수행한다
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def action_node(self, state: AgentState, config) -> dict:
+        """턴 기반 단일 노드.
+
+        구성: [진입 판정] -> [수집/검증 루프] -> [턴 종료 dict 반환]
+        interrupt 를 쓰지 않으므로 재실행(replay) 함정이 없다 — 위에서 아래로
+        읽히는 그대로가 실행 순서다.
+        """
+        sc = dict(state.get("action") or {})
+        msgs = state.get("messages") or []
+        awaiting = sc.get("awaiting")
+        model_name = state.get("model_name")   # 프론트 선택 모델 — 판단 에이전트가 쓴다
+
+        # ── 진입 판정 (구 action_entry — 턴 기반의 관제탑) ──────────────────
+        #
+        # 우선순위:
+        #   1) needs 메일박스 복귀      -> 수집 루프에서 회수
+        #   2) awaiting + 새 사용자 발화 -> 그 발화를 '질문에 대한 답'으로 소비
+        #   3) 진행 중 스크래치         -> 수집 루프부터 재개 (질문 재조립)
+        #   4) 그 외                    -> 의도 추론 (신규 액션)
+
+        if sc.get("needs"):
+            print(f"[ACTION entry] needs 복귀 -> param_check", flush=True)
+            emit(config, "agent_status", {"agent": "ActionAgent", "detail": "헬퍼 결과 회수"})
+
+        elif awaiting and msgs and isinstance(msgs[-1], HumanMessage):
+            # 질문을 던져놓고 기다리던 중 + 새 턴으로 들어온 HITL 답변
+            # (Router/Supervisor 를 거쳐 왔다)
+            answer = last_user_text(msgs)
+            print(f"[ACTION entry] HITL 답변 수신({awaiting['type']}): {answer!r}", flush=True)
+            emit(config, "agent_status",
+                 {"agent": "ActionAgent", "detail": f"사용자 응답 수신({awaiting['type']})"})
+            sc.pop("awaiting", None)
+
+            if awaiting["type"] == "confirm":
+                out = self._consume_confirm_answer(sc, answer, config, model_name=model_name)
+            else:
+                out = self._consume_param_answer(sc, answer, config, model_name=model_name,
+                                                question=awaiting.get("prompt"))
+
+            if out is not None:
+                return out           # 실행완료 / abandon / restart — 턴 종료
+
+        elif sc.get("phase") in ACTIVE_PHASES:
+            # 진행 중 스크래치 (awaiting 인데 새 발화가 없으면 질문을 다시 조립한다)
+            print(f"[ACTION entry] 재진입 (phase={sc.get('phase')})", flush=True)
+            emit(config, "agent_status", {"agent": "ActionAgent", "detail": "재진입(수집 재개)"})
+            sc.pop("awaiting", None)
+
+        else:
+            # 신규 진입 -> 의도/파라미터/참조 추출
+            text = last_user_text(msgs)
+            print(f"[ACTION entry] 신규 진입", flush=True)
+            print(f"[ACTION infer_intent] enter text='{text}'", flush=True)
+            emit(config, "agent_status", {"agent": "ActionAgent", "detail": "신규 진입"})
+            r = _action_agent().extract_intent(text, config=config, model_name=model_name)
+            sc = {
+                "action": r.action,
+                "phase": "param_check",
+                "params": {k: v.upper() for k, v in r.params.items()},
+                "missing": [],
+                # 발화에 값이 간접적으로 실린 것 같으면(참조 신호) 원문을 들고
+                # Supervisor 상담 후보로 둔다. 누가 풀어줄지는 여기서 모른다.
+                "consult_text": text if r.reference else None,
+                "collect_retries": 0,
+                "validate_retries": 0,
+                "hops": 0,
+            }
+            print(f"[ACTION infer_intent] -> action={r.action} params={sc['params']} "
+                  f"consult={bool(r.reference)}", flush=True)
+
+        # ── 수집/검증 루프 (구 param_check <-> validate) ────────────────────
+        for _ in range(MAX_LOOP_TURNS):
+
+            # 0) 헬퍼가 채워준 메일박스 회수 (needs-핸드오프 복귀 경로)
+            #
+            # 메일박스에는 헬퍼의 '자연어 답변'이 실려 온다. 구조화된 값을 기대하지
+            # 않는다 — 어떤 에이전트가 어떤 형태로 답하는지 ActionAgent 는 모르기
+            # 때문이다. 사용자의 답변을 읽던 것과 똑같이 ID 판독기로 읽는다.
+            if sc.get("needs"):
+                res = sc.pop("needs_result", None) or {}
+                needs = sc.pop("needs")
+                sc.pop("consult_text", None)
+                sc["hops"] = sc.get("hops", 0) + 1
+
+                value = None
+                if res.get("text"):
+                    ids = _tool.params_extract_tool.invoke(
+                        {"text": res["text"]}, config=config)
+                    pool = (ids["carrier_ids"] if needs["fill"] == "carrier_id"
+                            else ids["eqp_ids"])
+                    # 분석형 답변은 결론(권장값)이 마지막에 오는 경향이 있어
+                    # 같은 종류가 여럿이면 마지막 것을 취한다.
+                    value = pool[-1] if pool else None
+
+                if value:
+                    sc["params"][needs["fill"]] = value.upper()
+                    print(f"[ACTION param_check] 헬퍼({res.get('by')}) 답변에서 판독: "
+                          f"{needs['fill']}={value}", flush=True)
+                else:
+                    # 헬퍼가 없거나, 답변에서 값을 못 읽음 -> 사용자에게 직접(HITL 강등).
+                    # 상담도 재질문 한 번으로 세어 MAX_COLLECT 안에서 수렴하게 한다.
+                    sc["collect_retries"] = sc.get("collect_retries", 0) + 1
+                    sc["last_parse_error"] = res.get("note") or \
+                        f"{res.get('by', '동료 에이전트')} 답변에서 값을 찾지 못했습니다. 직접 입력해 주세요."
+                    print(f"[ACTION param_check] 헬퍼 실패 -> HITL 강등: {sc['last_parse_error']}", flush=True)
+
+            # 1) 필수 파라미터 충족 검사
+            check = param_check_tool(sc.get("action"), sc.get("params", {}))
+            sc["params"] = check["normalized"] or sc.get("params", {})
+            sc["missing"] = check["missing"]
+            emit(config, "tool_call", {"agent": "ActionAgent", "tool": "param_check_tool",
+                                       "args": {"action": sc.get("action"), "params": sc["params"]},
+                                       "result": {"missing": sc["missing"]}})
+
+            # 2) 상담 요청 → Supervisor 에게 (needs-핸드오프)
+            #
+            # 사용자의 답변(또는 최초 발화)에 필요한 값이 간접적으로 실려 있는데
+            # 판독기로 직접 읽히지 않는 경우다. 풀 동료가 없으면 Supervisor 가 빈
+            # 결과를 돌려보내고, 위 0) 회수 분기가 사용자에게 직접 묻는 쪽으로
+            # 강등한다.
+            consult = sc.get("consult_text")
+            if consult and sc["missing"]:
+                if sc.get("hops", 0) >= cfg.MAX_HOPS:
+                    print(f"[ACTION param_check] MAX_HOPS({cfg.MAX_HOPS}) 초과 -> 상담 포기, 직접 질문", flush=True)
+                    sc.pop("consult_text", None)
+                else:
+                    fill = sc["missing"][0]
+                    if sc.get("action") and fill != "action":
+                        question = _prompt.action_catalog()[sc["action"]]["param_prompts"].get(fill, "")
+                    else:
+                        question = _prompt.action_select_prompt()
+                    sc["needs"] = {"fill": fill, "question": question,
+                                   "answer": sc.pop("consult_text"),
+                                   "params": dict(sc.get("params") or {})}
+                    sc["phase"] = "awaiting_helper"
+                    print(f"[ACTION param_check] Supervisor 상담 요청: fill={fill} "
+                          f"answer='{sc['needs']['answer']}'", flush=True)
+                    return self._needs_exit(sc, config)
+
+            # 3) 미충족 → 수집 (한 번에 한 파라미터씩 질문하고 턴 종료)
+            if sc["missing"]:
+                if sc.get("collect_retries", 0) >= cfg.MAX_COLLECT:
+                    sc["abandon_reason"] = "필수 파라미터를 수집하지 못해 요청을 종료합니다."
+                    print(f"[ACTION param_check] MAX_COLLECT 초과 -> abandon", flush=True)
+                    return self._abandon(sc)
+                sc["pending_field"] = sc["missing"][0]
+                sc["phase"] = "collecting"
+                print(f"[ACTION param_check] 미충족 -> ask '{sc['pending_field']}'", flush=True)
+                return self._ask_param(sc)
+
+            # 4) 충족 → 검증
+            sc["phase"] = "validating"
+            validate = getattr(_tool, f"{sc['action']}_validate_tool")
+            print(f"[ACTION validate] enter action={sc['action']} params={sc['params']}", flush=True)
+            v = validate(sc["params"])
+            sc["validation"] = v
+            emit(config, "tool_call", {"agent": "ActionAgent", "tool": f"{sc['action']}_validate_tool",
+                                       "args": sc["params"], "result": {"ok": v["ok"], "code": v["code"]}})
+
+            if v["ok"]:
+                # 검증 통과 → 승인 질문 남기고 턴 종료
+                sc["phase"] = "confirming"
+                print(f"[ACTION validate] PASS -> ask_confirm", flush=True)
+                return self._ask_confirm(sc)
+
+            sc["validate_retries"] = sc.get("validate_retries", 0) + 1
+            if sc["validate_retries"] >= cfg.MAX_VALIDATE:
+                sc["abandon_reason"] = f"유효성 검증에 반복 실패해 요청을 종료합니다. (사유: {v['reason']})"
+                print(f"[ACTION validate] MAX_VALIDATE 초과 -> abandon ({v['reason']})", flush=True)
+                return self._abandon(sc)
+
+            # 문제가 된 파라미터만 비우고 재수집 (수렴 보장 지점)
+            for bad in v.get("bad_fields", []):
+                sc["params"].pop(bad, None)
+            sc["last_parse_error"] = f"검증 실패: {v['reason']}"
+            sc["phase"] = "param_check"
+            print(f"[ACTION validate] FAIL({v['code']}) -> {v.get('bad_fields')} 비우고 재수집", flush=True)
+            # continue -> 루프 맨 위 param_check 부터
+
+        # 루프 상한 — 정상 경로에서는 도달하지 않는다
+        sc["abandon_reason"] = "내부 루프 한도를 초과해 요청을 종료합니다."
+        print(f"[ACTION loop] MAX_LOOP_TURNS({MAX_LOOP_TURNS}) 초과 -> abandon", flush=True)
+        return self._abandon(sc)
 
 
 action_service = ActionService()

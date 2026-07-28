@@ -254,8 +254,8 @@ async def params_extract_tool(user_query: str, config: RunnableConfig = {}) -> D
     최종적으로 그 예상지 중 하나에 정말 맞았는지 — 아니면 아무 데도
     해당사항이 없는지(언노운) — DB 를 통해 판단해 돌려준다.
 
-    ※ 이 툴이 곧 'ID 판독기' 다. app/id_reader.py 는 이것을 몰라서 새로 만든
-      중복 구현이므로, 사내 반입 시에는 id_reader 를 버리고 이 툴을 부를 것.
+    ※ 이 툴이 곧 'ID 판독기' 다. app 쪽도 같은 이름의 툴 하나로 합쳐 두었으니
+      (ExtractAgent 와 ActionAgent 가 함께 쓴다) 반입 시 이 본문을 유지할 것.
     """
     print(f"[TOOL params_extract_tool] enter user_query={user_query!r}", flush=True)
     raise NotImplementedError("사내 구현으로 교체 — ID 종류 판정 DB 조회")

@@ -17,8 +17,8 @@
     ├── routes.py                  │   ├── routes.py      (병합 — 스트림 루프)
     ├── graph_service.py           │   ├── graph_service.py (교체 — 모델별 캐시)
     └── schemas.py                 │   └── schemas.py     (필드 추가)
-                                   ├── actions/           ★ 통째 복사 (신규)
-                                   ├── id_reader.py       ★ 통째 복사 (신규)
+                                   ├── _tool.py           (병합 — ActionAgent 섹션)
+                                   ├── _db.py             ★ 통째 복사 (신규, 목업 DB)
                                    └── _prompt.py         ★ 통째 복사 (문구는 사내화)
 ```
 
@@ -50,18 +50,16 @@
 
 | 파일 | 내용 | 사내 반입 시 손볼 곳 |
 |---|---|---|
-| `_util.py`(ActionService)/`_db.py` + `_tool.py`·`_prompt.py` 의 ActionAgent 섹션 | ActionAgent 도메인 (선언은 `_prompt.action_catalog()`) | `_db.py` → 나중에 실 DB (7단계) |
-| ├ `node.py` | **턴 기반 HITL 단일 노드** (핵심) | 없음 |
-| ├ `registry.py` | ActionSpec + 액션 2종 등록 | 액션 추가 시 여기만 |
-| ├ `tools.py` | param_check / validate / confirm / execute | validate/execute 본문 (7단계) |
-| ├ `resolvers.py` | 답변 판정 (취소/값/상담/맥락이탈) | 취소·전환 키워드 사내 어휘 보강 |
-| └ `_db.py` | 목업 DB + 공유 조회 함수 | 실 DB 로 교체 (7단계) |
-| `app/id_reader.py` | ID 판독기 (정규식 후보 → 존재 조회) | `id_lookup_tool` 본문 → 실 DB (7단계) |
+| `_util.py` 의 `ActionService` | **턴 기반 HITL 단일 노드** (핵심). 판단은 `_agent.action_agent`, 흐름만 여기 | 없음 |
+| `_prompt.py` 의 `action_catalog()` | 액션 선언 (표시명·필수 파라미터·질문 문구) | 액션 추가 시 여기 + 툴 3개만 |
+| `_tool.py` 의 ActionAgent 섹션 | param_check / validate / confirm / execute | validate/execute 본문 (7단계) |
+| `_tool.py` 의 `params_extract_tool` | ID 판독기 — 후보 추출 + DB 종류 판정 | 본문 → 사내 실 DB 조회 (7단계) |
+| `app/_db.py` | 목업 DB + 공유 조회 함수 | 실 DB 로 교체 (7단계) |
 | `app/_prompt.py` | 프롬프트 모음 | 문구 전부 사내화 가능 (로직 무관) |
 | `app/api/usage_store.py` | thread별 토큰/시간 원장 | 선택 (안 쓰면 routes 에서 호출 제거) |
 | `app/api/limits.py` | 동시성/유량 제어 | 선택 |
 
-**확인**: `python -c "from app._action import action_node; print('ok')"`
+**확인**: `python -c "from app._util import action_service; print(action_service.action_node)"`
 
 ---
 
@@ -230,7 +228,7 @@ add_edge(member, "Supervisor")`)가 도는 건 사내 코드 그대로면 자동
 
 | 교체 지점 | 파일 | 비고 |
 |---|---|---|
-| ID 판독기 | `id_reader.py` 의 `id_lookup_tool` 본문 | 후보 문자열 → DB 존재 조회. **여기 한 곳만** 바꾸면 수집/상담/추출 전부 따라옴 |
+| ID 판독기 | `_tool.py` 의 `params_extract_tool` 본문 | 후보 문자열 → DB 종류 판정. 사내엔 이 툴이 이미 있으므로 **본문을 가져가지 말고 사내 것을 그대로 쓴다** — 그러면 수집/상담/추출이 전부 따라옴 |
 | 검증/실행 | `_tool.py (ActionAgent 섹션)` 의 `*_validate_tool` / `*_execute_tool` | 시그니처 유지하면 node.py 무수정 |
 | LLM | `_llm.get_llm` | 이미 게이트웨이 규약(placeholder EMPTY 등) 맞춰둠. 사내 llm_t1 이 있으면 그걸로 |
 | 워커 스텁 | `_node.py` 의 location/status/log/extract | 사내 실제 노드로 교체. **계약 하나만 유지**: 결과를 `AIMessage(name=에이전트명)` 으로 messages 에 남길 것 (Supervisor 의 상담 회수가 그걸 읽음) |

@@ -15,7 +15,9 @@ app/      origin + HITL ActionAgent. 이 저장소에서 실제로 도는 코드
 
 1. **origin 에 있는 함수/파일은 시그니처·반환 형태·이름을 origin 과 맞춘다.**
    같은 일을 하는 코드가 양쪽에서 다르게 생기면 이식 때 병합 지옥이 된다.
-2. **새 기능은 가능하면 새 파일로 붙인다** (예: `app/_util.py 의 ActionService`, `app/id_reader.py`).
+2. **새 기능은 가능하면 기존 파일의 새 섹션/새 클래스로 붙인다** (예: `app/_util.py 의 ActionService`).
+   사내에 이미 같은 일을 하는 함수가 있으면 **새 파일을 만들지 말고 그것을 쓴다**
+   (예: ID 판독 → `params_extract_tool`. 별도 판독기 모듈을 두면 이식 때 버려진다).
    기존 파일 수정은 "몇 줄 추가" 수준으로 유지한다 — 통째 재작성 금지.
 3. **origin 과 일부러 다르게 가는 부분은 그 파일에 주석으로 이유를 남긴다.**
    이유를 못 쓰겠으면 다르게 갈 이유가 없는 것이다.
@@ -54,6 +56,6 @@ app/      origin + HITL ActionAgent. 이 저장소에서 실제로 도는 코드
 | 에이전트 이름 표기 | `additional_kwargs["agent_name"]` | 동일 + `name=` 폴백 병기 (수렴 완료) | 판독은 `_util.agent_name_of` |
 | model_name 전달 | state + `config.configurable` 둘 다 | 동일 (수렴 완료) | — |
 | 스트림 | raw text | SSE 5 이벤트 (`docs/API.md`) | app 확장 — 이식 시 routes 병합 |
-| ID 판독 | `params_extract_tool` (DB) | `app/id_reader.py` | **id_reader 는 이식하지 않는다** — 사내에선 params_extract_tool 을 부른다 |
+| ID 판독 | `params_extract_tool` (DB) | 동일 — `_tool.py 의 params_extract_tool` (수렴 완료) | ExtractAgent·ActionAgent 가 같은 툴을 쓴다. 이식 시 본문은 사내 것 유지 |
 
 이식 절차 자체는 `docs/PORTING.md`.

@@ -408,7 +408,7 @@ def classify_collect_answer(fieldname: str, answer, current_action: str | None,
 
     반환: {"kind": cancel|consult|switch|action|value|empty, "text"/"value"/"note"...}
 
-    value 로 분류돼도 실제 ID 인식·존재 확인은 판독기 툴(id_reader)이 한다 —
+    value 로 분류돼도 실제 ID 인식·존재 확인은 판독기 툴(params_extract_tool)이 한다 —
     LLM 은 종류만 판단하고 값은 만들어내지 않는다.
     """
     text = str(answer or "")

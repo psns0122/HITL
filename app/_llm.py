@@ -2,6 +2,9 @@
 
 origin/_llm.py 와 동일하다. app 추가분은 ************* 로 표시.
 """
+# *************  [app 전용 import — 아래 경고 억제에 쓴다]  *************
+import warnings
+# *************
 from typing import Dict
 
 import requests
@@ -135,6 +138,22 @@ def list_models() -> dict:
             for model_id in AVAILABLE_MODELS
         ],
     }
+
+
+# 구조화 출력 때마다 콘솔에 뜨는 pydantic 직렬화 경고를 지운다.
+#
+#   PydanticSerializationUnexpectedValue(Expected `none` ...
+#       [field_name='parsed', input_value=SupervisorOut(next='ActionAgent')])
+#
+# 에러가 아니다. langchain_openai 가 응답을 model_dump() 할 때 openai SDK 의
+# ParsedChatCompletionMessage.parsed 가 제네릭 미지정(=None 타입)이라서 나는
+# 상위 라이브러리 잡음이다. 판정 결과(SupervisorOut)는 정상으로 파싱돼 온다.
+# 실행에는 영향이 없는데 콘솔에서는 에러처럼 보여 원인 추적을 방해하므로
+# 이 문구만 좁게 막는다. (호출 방식을 바꿔 피하는 방법도 있지만, 게이트웨이가
+#  지금 방식으로 잘 받고 있어 프로토콜은 건드리지 않는다)
+warnings.filterwarnings("ignore",
+                        message="Pydantic serializer warnings",
+                        category=UserWarning)
 
 
 def structured_invoke(llm, schema, messages, config=None):

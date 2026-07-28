@@ -16,8 +16,11 @@ from app._util import (
     last_user_text,
     member_answered_this_turn,
 )
+# *************  [app — 워커 스텁이 목업 DB 와 ID 판독기 툴을 직접 본다.
+#                  사내 노드는 에이전트에 위임하므로 이 두 import 가 없다]  *************
 from app import _db as mock_db
-from app.id_reader import extract_ids
+from app import _tool
+# *************
 
 # Supervisor 밑에 붙는 워커들
 members = ["StatusAgent", "LocationAgent", "LogAgent", "ActionAgent", "ExtractAgent"]
@@ -281,7 +284,7 @@ def location_node(state: _state.AgentState, config, model_name: str = None) -> d
     emit(config, "agent_status", {"agent": "LocationAgent", "detail": "위치 조회"})
 
     text = last_user_text(state.get("messages", []))
-    ids = extract_ids(text)
+    ids = _tool.params_extract_tool.invoke({"text": text}, config=config)
 
     lines, facts = [], {}
     for c in ids["carrier_ids"]:
@@ -311,7 +314,7 @@ def status_node(state: _state.AgentState, config, model_name: str = None) -> dic
     emit(config, "agent_status", {"agent": "StatusAgent", "detail": "상태 조회"})
 
     text = last_user_text(state.get("messages", []))
-    ids = extract_ids(text)
+    ids = _tool.params_extract_tool.invoke({"text": text}, config=config)
 
     lines = []
     for c in ids["carrier_ids"]:
@@ -345,7 +348,7 @@ def log_node(state: _state.AgentState, config, model_name: str = None) -> dict:
 
     # 분석 대상 캐리어: 발화 내 ID > 전체
     text = last_user_text(state.get("messages", []))
-    ids = extract_ids(text)
+    ids = _tool.params_extract_tool.invoke({"text": text}, config=config)
     carrier = ids["carrier_ids"][0] if ids["carrier_ids"] else None
 
     emit(config, "tool_call", {"agent": "LogAgent", "tool": "log_search_tool",
@@ -390,10 +393,9 @@ def extract_node(state: _state.AgentState, config, model_name: str = None) -> di
                                "args": {"text": text}, "result": {"fab": "M16"}})
     fab = "M16"
 
-    # params_extract_tool 상당 — 발화에서 ID 를 뽑는다
-    ids = extract_ids(text)
-    emit(config, "tool_call", {"agent": "ExtractAgent", "tool": "params_extract_tool",
-                               "args": {"text": text}, "result": ids})
+    # ID 판독기 — 진짜 툴을 호출하므로 트레이스는 on_tool_start/end 로 자동으로 뜬다
+    # (emit 을 겹쳐 찍으면 프론트 트레이스에 같은 툴이 두 줄 난다)
+    ids = _tool.params_extract_tool.invoke({"text": text}, config=config)
 
     carriers = ids.get("carrier_ids") or []
     eqps = ids.get("eqp_ids") or []

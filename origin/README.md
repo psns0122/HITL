@@ -70,11 +70,12 @@ def 이름(..., config: RunnableConfig = {}) -> Dict[str, Any]:
 
 ### ⚠ `params_extract_tool` = 이미 존재하는 ID 판독기
 
-`app/id_reader.py` 는 "정체불명 ID 를 DB 로 판정" 하려고 새로 만든 것인데,
+`app/_tool.py 의 params_extract_tool` 이 "정체불명 ID 를 DB 로 판정" 하는데,
 `params_extract_tool` 이 **이미 정확히 그 일을 한다** (캐리어/랏/장비/유닛/
 포트/존 중 무엇인지, 아니면 unknown 인지를 DB 로 판정).
 
-→ 사내 반입 시 `id_reader.py` 는 **가져가지 말고**, ActionAgent 가
+→ 그래서 app 쪽 판독기도 별도 모듈을 없애고 이 툴 하나로 합쳤다.
+   사내 반입 시 이 툴의 **본문은 사내 것을 그대로 두고**, ActionAgent 가
 `params_extract_tool` 을 부르게 바꾸는 게 맞습니다. 자세한 건
 `docs/PORTING.md` 참고.
 

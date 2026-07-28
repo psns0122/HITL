@@ -7,10 +7,11 @@
 모든 툴은 진입 시점과 진행 과정을 print 로 상세히 남긴다.
 (사내 요구사항: 별도 로깅 라이브러리 없이 print)
 """
+import re
+
 from langchain_core.tools import tool
 
 from app import _db as mock_db
-from app.id_reader import extract_ids
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -183,21 +184,60 @@ def fab_extract_tool(text: str) -> str:
     return f"fab={fab}"
 
 
+# ID 후보 토큰: 영숫자 3~20자 중 숫자를 하나라도 포함한 것.
+#
+# 이건 '유효한 ID 인지' 판정하는 정규식이 아니다. 형식은 여기서 따지지 않는다.
+# ID 스러운 건 일단 전부 후보로 올리고, 종류와 유효성은 아래 DB 조회가 정한다.
+# (형식이 아니라 조회가 권한 — 사내 판정 방식과 같다)
+#
+# 주의: \b 는 한글도 \w 로 취급해 "STK102로"의 조사 앞에서 경계가 안 잡힌다
+#       -> ASCII 영숫자만 배제하는 lookaround 를 쓴다.
+ID_CANDIDATE_RE = re.compile(r"(?<![A-Z0-9])[A-Z0-9]{3,20}(?![A-Z0-9])")
+
+
 @tool
 def params_extract_tool(text: str) -> dict:
-    """발화 속 정체불명 ID 가 실제로 무엇인지 판정한다 (ID 판독기).
+    """발화 속 정체불명 ID 가 실제로 무엇인지 DB 로 판정한다 (ID 판독기).
 
     사내 params_extract_tool 과 같은 계약 — dict 를 돌려준다.
     ExtractAgent 의 핵심 툴이자, ActionAgent 의 HITL 수집 루프도
-    사용자 답변을 읽을 때 이 툴을 그대로 쓴다.
+    사용자 답변·헬퍼 답변을 읽을 때 이 툴을 그대로 쓴다.
+    (ID 판독은 LLM 판단이 아니라 DB 조회다 — 그래서 툴이 한다)
+
+    ★ 사내 반입 시 이 본문만 실 DB 조회로 갈아끼우면 ExtractAgent 와
+      ActionAgent 가 함께 따라온다. 판독기를 별도 모듈로 두지 않는 이유다.
+
+    Returns:
+        {"carrier_ids": [...], "eqp_ids": [...], "unknown": [...]}
+        unknown = 후보로는 올라왔지만 조회에 걸리지 않은 것들.
+                  (사용자에게 되물을 때 근거로 쓴다)
     """
     print(f"[TOOL params_extract] enter text={text!r}", flush=True)
 
-    ids = extract_ids(text)
-    print(f"[TOOL params_extract] carrier_ids={ids['carrier_ids']} "
-          f"eqp_ids={ids['eqp_ids']} unknown={ids['unknown']}", flush=True)
+    # 1) 후보 추출 — 숫자가 섞인 영숫자 덩어리를 순서대로 모은다
+    candidates = []
+    for tok in ID_CANDIDATE_RE.findall((text or "").upper()):
+        # 숫자가 하나도 없으면 ID 후보로 보지 않는다 ("STK", "OK" 같은 말 배제)
+        if not any(ch.isdigit() for ch in tok):
+            continue
+        if tok not in candidates:
+            candidates.append(tok)
+    print(f"[TOOL params_extract] 후보={candidates}", flush=True)
 
-    return ids
+    # 2) 종류 판정 — 조회에 걸리는 쪽이 그 후보의 정체다
+    carrier_ids, eqp_ids, unknown = [], [], []
+    for cand in candidates:
+        if mock_db.get_carrier(cand):
+            carrier_ids.append(cand)
+        elif mock_db.get_equipment(cand):
+            eqp_ids.append(cand)
+        else:
+            unknown.append(cand)
+
+    print(f"[TOOL params_extract] carrier_ids={carrier_ids} "
+          f"eqp_ids={eqp_ids} unknown={unknown}", flush=True)
+
+    return {"carrier_ids": carrier_ids, "eqp_ids": eqp_ids, "unknown": unknown}
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -205,8 +245,11 @@ def params_extract_tool(text: str) -> dict:
 #   ★ 사내 반입 시 validate/execute 본문을 실제 DB/API 호출로 교체하는 지점
 # ─────────────────────────────────────────────────────────────────────────
 
-# ID 판독기는 여기 없다 — ExtractAgent 소유의 공용 툴이다(app/id_reader.py).
-# ActionAgent 는 예외적으로 그 모듈을 직접 import 해서 쓴다.
+# ID 판독기는 위 params_extract_tool 하나뿐이다 (ExtractAgent 소유의 공용 툴).
+# ActionAgent 도 예외적으로 그 툴을 직접 호출해서 쓴다 — HITL 수집 루프는
+# 답변마다 판독이 필요한데, 그때마다 Supervisor-ExtractAgent 왕복을 태우면
+# 답변 하나에 그래프가 한 바퀴씩 돌아 HITL 이 감당 못 하게 무거워진다.
+# 공유는 '에이전트' 가 아니라 '툴' 수준에서만 한다.
 
 
 # ── 1. (공용) param_check_tool ────────────────────────────────────────────

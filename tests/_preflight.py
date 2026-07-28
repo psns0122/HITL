@@ -27,7 +27,7 @@ def require_gateway():
         print("\n[preflight] 게이트웨이에 붙지 못했습니다.", flush=True)
         print(f"           사유: {type(e).__name__}: {e}", flush=True)
         print("\n이 테스트들은 실제 LLM 이 있어야 돕니다.", flush=True)
-        print(".env 의 LLM_GATEWAY_BASE_URL / LLM_GATEWAY_API_KEY 를 확인하고,", flush=True)
+        print(".env 의 API_BASE_TEMPLATE / LLM_GATEWAY_API_KEY 를 확인하고,", flush=True)
         print("사내망에서 다시 실행해 주세요.", flush=True)
         sys.exit(1)
 

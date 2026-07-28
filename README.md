@@ -424,7 +424,7 @@ origin/                  # ← HITL 이전 사내 원본 (비교 전용, 실행 
 | LocationAgent | `location_search_tool` |
 | LogAgent | `log_search_tool` |
 | ExtractAgent | `fab_extract_tool`, `params_extract_tool` |
-| ActionAgent | (단일 노드가 직접 호출 — `_tool.py (ActionAgent 섹션)`, `id_reader.py`) |
+| ActionAgent | (단일 노드가 직접 호출 — `_tool.py (ActionAgent 섹션)` + ID 판독은 `params_extract_tool`) |
 
 모든 툴은 `disable_tool_caching()` 을 거칩니다. 설비/캐리어 상태는 계속 바뀌므로
 같은 질문이라도 매번 실제 DB 를 봐야 하기 때문입니다.
