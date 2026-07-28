@@ -130,6 +130,44 @@ def log_agent_prompt() -> str:
 """
 
 
+def action_catalog() -> dict:
+    """액션 선언 — 무엇이 있고, 표시명과 필수 파라미터·질문 문구가 무엇인지.
+
+    레지스트리 클래스 대신 프롬프트 계층이 선언을 소유한다.
+    새 액션 추가 = 여기 항목 1개 + _tool.py 에
+    {action}_validate_tool / {action}_confirm_tool / {action}_execute_tool
+    세 개를 네이밍 규칙대로 만들면 끝. (_action.py 가 이름으로 바인딩한다)
+    """
+    return {
+        "transport": {
+            "label": "반송요청명령",
+            "required_params": ["carrier_id", "eqp_id"],
+            "param_prompts": {
+                "carrier_id": "반송할 캐리어 ID를 알려주세요. (예: 6PDMQ283)",
+                "eqp_id": "목적지 장비 ID를 알려주세요. (예: STK102) "
+                          "다른 캐리어가 있는 위치로 보내려면 '<캐리어ID> 위치로'라고 답하셔도 됩니다.",
+            },
+        },
+        "dest_req": {
+            "label": "목적지요청",
+            "required_params": ["carrier_id"],
+            "param_prompts": {
+                "carrier_id": "목적지요청할 캐리어 ID를 알려주세요. (예: 6PDMQ283)",
+            },
+        },
+    }
+
+
+def action_select_prompt() -> str:
+    """액션 자체가 미확정일 때 사용자에게 묻는 질문."""
+    return (
+        "어떤 명령을 실행할까요?\n"
+        "1) 반송요청명령(transport) — 캐리어를 특정 장비로 반송\n"
+        "2) 목적지요청(dest_req) — 캐리어의 목적지 배정 요청\n"
+        "('반송' 또는 '목적지'라고 답해주세요. 취소하려면 '취소')"
+    )
+
+
 def action_agent_prompt() -> str:
     """ActionAgent — 실제 명령 실행 (HITL 대상)."""
     return """

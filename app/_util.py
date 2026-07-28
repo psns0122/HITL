@@ -78,6 +78,17 @@ def last_user_text(source) -> str:
 last_human_text = last_user_text
 
 
+def agent_name_of(msg) -> str | None:
+    """메시지를 만든 에이전트 이름.
+
+    사내 규약은 additional_kwargs["agent_name"] 이다 (_util.agent_node 가 박는다).
+    name= 은 이 저장소가 함께 싣는 폴백 — 판독은 사내 규약을 먼저 본다.
+    """
+    if not isinstance(msg, AIMessage):
+        return None
+    return (msg.additional_kwargs or {}).get("agent_name") or getattr(msg, "name", None)
+
+
 def member_answered_this_turn(messages: list, members: list) -> AIMessage | None:
     """이번 user turn 안에서 member 에이전트가 남긴 마지막 AIMessage.
 
@@ -86,7 +97,7 @@ def member_answered_this_turn(messages: list, members: list) -> AIMessage | None
     for msg in reversed(messages or []):
         if isinstance(msg, HumanMessage):
             return None
-        if isinstance(msg, AIMessage) and getattr(msg, "name", None) in members:
+        if agent_name_of(msg) in members:
             return msg
     return None
 
@@ -99,7 +110,7 @@ def agent_ran_this_turn(messages: list, agent_name: str) -> bool:
     for msg in reversed(messages or []):
         if isinstance(msg, HumanMessage):
             return False
-        if isinstance(msg, AIMessage) and getattr(msg, "name", None) == agent_name:
+        if agent_name_of(msg) == agent_name:
             return True
     return False
 
@@ -176,3 +187,4 @@ def normalize_route_label(content: str) -> str:
         return "supervisor"
 
     return "supervisor"
+

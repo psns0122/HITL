@@ -221,18 +221,18 @@ def params_extract_tool(text: str) -> str:
 
 def param_check_tool(action: str | None, params: dict) -> dict:
     """의도별 필수 파라미터 충족 여부 확인. 미충족 -> HITL 루프의 근거가 된다."""
-    from app._registry import ACTION_REGISTRY   # 순환 import 회피 (registry 가 _tool 을 import)
+    from app import _prompt   # 액션 선언은 프롬프트 계층 소유
 
     print(f"[TOOL param_check] enter action={action} params={params}", flush=True)
     if not action:
         print(f"[TOOL param_check] action 미확정 -> missing=['action']", flush=True)
         return {"satisfied": False, "missing": ["action"], "normalized": dict(params or {})}
 
-    spec = ACTION_REGISTRY[action]
+    required = _prompt.action_catalog()[action]["required_params"]
     normalized = {k: (v.upper() if isinstance(v, str) else v)
                   for k, v in (params or {}).items() if v}
-    missing = [p for p in spec.required_params if not normalized.get(p)]
-    print(f"[TOOL param_check] required={spec.required_params} -> missing={missing}", flush=True)
+    missing = [p for p in required if not normalized.get(p)]
+    print(f"[TOOL param_check] required={required} -> missing={missing}", flush=True)
     return {"satisfied": not missing, "missing": missing, "normalized": normalized}
 
 

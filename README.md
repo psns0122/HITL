@@ -453,7 +453,7 @@ ExtractAgent 는 답변을 내는 워커가 아니라 **뒤 단계가 쓸 ID 재
 
 ### 액션 추가하기
 
-`app/_registry.py` 에 `ActionSpec` 한 개를 추가하고 툴 3개(validate/confirm/execute)를
+`app/_prompt.py` 의 `action_catalog()` 에 항목 1개를 추가하고 툴 3개(validate/confirm/execute)를
 쓰면 끝입니다. 그래프 배선은 건드릴 필요 없습니다.
 
 ```python

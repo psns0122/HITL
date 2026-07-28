@@ -50,7 +50,7 @@
 
 | 파일 | 내용 | 사내 반입 시 손볼 곳 |
 |---|---|---|
-| `_action.py`/`_registry.py`/`_db.py` + `_tool.py` 의 ActionAgent 섹션 | ActionAgent 도메인 | `_db.py` → 나중에 실 DB (7단계) |
+| `_action.py`/`_db.py` + `_tool.py`·`_prompt.py` 의 ActionAgent 섹션 | ActionAgent 도메인 (선언은 `_prompt.action_catalog()`) | `_db.py` → 나중에 실 DB (7단계) |
 | ├ `node.py` | **턴 기반 HITL 단일 노드** (핵심) | 없음 |
 | ├ `registry.py` | ActionSpec + 액션 2종 등록 | 액션 추가 시 여기만 |
 | ├ `tools.py` | param_check / validate / confirm / execute | validate/execute 본문 (7단계) |

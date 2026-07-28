@@ -48,7 +48,7 @@ import app.config as cfg
 from app._agent import action_agent
 from app._state import AgentState
 from app._util import emit, last_human_text
-from app._registry import ACTION_REGISTRY, ACTION_SELECT_PROMPT
+from app import _prompt, _tool
 from app._tool import param_check_tool
 # ID 판독기는 ExtractAgent 소유의 툴이지만, HITL 수집 루프는 답변마다 판독이
 # 필요해 Supervisor 왕복을 태울 수 없다. 예외적으로 툴만 공용으로 빌려 쓴다.
@@ -88,9 +88,9 @@ def _ask_param(sc: dict) -> dict:
     """⏸ HITL #1 — 부족한 파라미터를 질문하고 턴을 끝낸다 (interrupt 아님)."""
     fieldname = sc.get("pending_field")
     if fieldname == "action":
-        prompt = ACTION_SELECT_PROMPT
+        prompt = _prompt.action_select_prompt()
     else:
-        prompt = ACTION_REGISTRY[sc["action"]].param_prompts[fieldname]
+        prompt = _prompt.action_catalog()[sc["action"]]["param_prompts"][fieldname]
     note = sc.pop("last_parse_error", None)
     if note:
         prompt = f"{note}\n{prompt}"
@@ -110,15 +110,17 @@ def _ask_param(sc: dict) -> dict:
         "action": sc,
         # 질문을 대화에도 남긴다 — Supervisor 의 '방금 물었음' 판정과
         # 다음 턴 컨텍스트의 근거가 된다.
-        "messages": [AIMessage(content=prompt, name="ActionAgent")],
+        "messages": [AIMessage(content=prompt,
+name="ActionAgent",
+additional_kwargs={"agent_name": "ActionAgent"})],
         "next": "Supervisor",
     }
 
 
 def _ask_confirm(sc: dict) -> dict:
     """⏸ HITL #2 — 실행 직전 최종 승인 질문을 남기고 턴을 끝낸다."""
-    spec = ACTION_REGISTRY[sc["action"]]
-    guidance = spec.confirm_text(sc["params"])
+    # 툴 바인딩은 네이밍 규칙 — _tool.py 의 {action}_confirm_tool
+    guidance = getattr(_tool, f"{sc['action']}_confirm_tool")(sc["params"])
 
     sc["awaiting"] = {
         "type": "confirm",
@@ -132,7 +134,9 @@ def _ask_confirm(sc: dict) -> dict:
 
     return {
         "action": sc,
-        "messages": [AIMessage(content=guidance, name="ActionAgent")],
+        "messages": [AIMessage(content=guidance,
+name="ActionAgent",
+additional_kwargs={"agent_name": "ActionAgent"})],
         "next": "Supervisor",
     }
 
@@ -149,23 +153,25 @@ def _needs_exit(sc: dict, config) -> dict:
 
 def _execute_and_finalize(sc: dict, config) -> dict:
     """진짜 액션 수행 — 명시적 승인 이후에만 도달하는 유일한 side-effect 지점."""
-    spec = ACTION_REGISTRY[sc["action"]]
+    label = _prompt.action_catalog()[sc["action"]]["label"]
     print(f"[ACTION execute] enter action={sc['action']} params={sc['params']}", flush=True)
-    result = spec.execute(sc["params"])
+    result = getattr(_tool, f"{sc['action']}_execute_tool")(sc["params"])
     sc["result"] = result
     emit(config, "tool_call", {"agent": "ActionAgent", "tool": f"{sc['action']}_execute_tool",
                                "args": sc["params"], "result": result})
 
     res = sc.get("result", {})
     payload = res.get("payload", {})
-    lines = [f"✅ {spec.label} 실행 완료",
+    lines = [f"✅ {label} 실행 완료",
              f"- Job ID: {res.get('job_id')}",
              f"- 상태: {res.get('status')}"]
     lines += [f"- {k}: {v}" for k, v in payload.items()]
     print(f"[ACTION finalize] job={res.get('job_id')}", flush=True)
 
     return {
-        "messages": [AIMessage(content="\n".join(lines), name="ActionAgent")],
+        "messages": [AIMessage(content="\n".join(lines),
+name="ActionAgent",
+additional_kwargs={"agent_name": "ActionAgent"})],
         "facts": {"last_action": {"action": sc["action"], "params": sc.get("params"),
                                   "result": res}},
         "action": {},          # 스크래치 리셋 — 다음 요청 오염 방지
@@ -176,11 +182,13 @@ def _execute_and_finalize(sc: dict, config) -> dict:
 def _abandon(sc: dict) -> dict:
     """취소/거절/한도초과 종료: 안내 메시지 + 스크래치 리셋. 재시도 집착 금지."""
     reason = sc.get("abandon_reason") or "요청을 종료했습니다."
-    label = ACTION_REGISTRY[sc["action"]].label if sc.get("action") in ACTION_REGISTRY else "명령"
+    catalog = _prompt.action_catalog()
+    label = catalog[sc["action"]]["label"] if sc.get("action") in catalog else "명령"
     print(f"[ACTION abandon] {reason}", flush=True)
     return {
         "messages": [AIMessage(content=f"🚫 {label} 을(를) 실행하지 않았습니다.\n- 사유: {reason}",
-                               name="ActionAgent")],
+name="ActionAgent",
+additional_kwargs={"agent_name": "ActionAgent"})],
         "facts": {"last_action": {"action": sc.get("action"), "aborted": True,
                                   "reason": reason}},
         "action": {},          # 스크래치 리셋
@@ -378,8 +386,7 @@ def _consume_confirm_answer(sc: dict, decision, config, model_name=None):
         # 고치려 한 건 분명한데 조회가 안 되는 ID -> 그 자리만 비우고 다시 묻는다.
         # 어느 파라미터를 고치려는지 모를 땐 마지막 필수 파라미터로 본다
         # (transport 면 목적지 eqp_id — '바꿔줘'는 대개 목적지를 가리킨다).
-        spec = ACTION_REGISTRY[sc["action"]]
-        target = spec.required_params[-1]
+        target = _prompt.action_catalog()[sc["action"]]["required_params"][-1]
         sc["params"].pop(target, None)
         sc["last_parse_error"] = (
             f"'{', '.join(ids['unknown'])}' 은(는) 조회되지 않는 ID 입니다.")
@@ -520,9 +527,9 @@ def action_node(state: AgentState, config) -> dict:
             else:
                 fill = sc["missing"][0]
                 if sc.get("action") and fill != "action":
-                    question = ACTION_REGISTRY[sc["action"]].param_prompts.get(fill, "")
+                    question = _prompt.action_catalog()[sc["action"]]["param_prompts"].get(fill, "")
                 else:
-                    question = ACTION_SELECT_PROMPT
+                    question = _prompt.action_select_prompt()
                 sc["needs"] = {"fill": fill, "question": question,
                                "answer": sc.pop("consult_text"),
                                "params": dict(sc.get("params") or {})}
@@ -544,9 +551,9 @@ def action_node(state: AgentState, config) -> dict:
 
         # 4) 충족 → 검증
         sc["phase"] = "validating"
-        spec = ACTION_REGISTRY[sc["action"]]
+        validate = getattr(_tool, f"{sc['action']}_validate_tool")
         print(f"[ACTION validate] enter action={sc['action']} params={sc['params']}", flush=True)
-        v = spec.validate(sc["params"])
+        v = validate(sc["params"])
         sc["validation"] = v
         emit(config, "tool_call", {"agent": "ActionAgent", "tool": f"{sc['action']}_validate_tool",
                                    "args": sc["params"], "result": {"ok": v["ok"], "code": v["code"]}})

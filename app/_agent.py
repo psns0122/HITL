@@ -21,7 +21,6 @@ from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field
 
 from app import _llm, _prompt, _state, _tool, _util
-from app._registry import ACTION_REGISTRY
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -345,8 +344,8 @@ def extract_intent(text: str, config=None, model_name: str = None) -> IntentResu
     """
     try:
         spec_desc = "\n".join(
-            f"- {s.name}({s.label}): 필수 {s.required_params}"
-            for s in ACTION_REGISTRY.values()
+            f"- {name}({meta['label']}): 필수 {meta['required_params']}"
+            for name, meta in _prompt.action_catalog().items()
         )
 
         out: IntentOut = _llm.structured_invoke(

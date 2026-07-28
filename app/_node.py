@@ -62,17 +62,26 @@ async def router_node(state: _state.AgentState, config) -> dict:
     print("[NODE] Router entered", flush=True)
     emit(config, "agent_status", {"agent": "Router", "detail": "의도 분류 중"})
 
-    # HITL 재개가 아닌 새 질의만 여기로 온다.
-    # 단, 진행 중 액션이 있으면 분류할 것도 없이 supervisor 로 고정한다.
+    # [app 추가] HITL 진행 중이면 분류할 것도 없이 Supervisor 로 고정한다.
+    # (HITL 답변이 general 로 오분류되면 진행 중 액션이 고아가 되기 때문)
     if (state.get("action") or {}).get("phase"):
         print("[NODE] Router: 진행 중 액션 감지 -> Supervisor 고정", flush=True)
-        return {"route": "supervisor", "handoff": True, "next": "supervisor", "step": 1}
+        return {"route": "supervisor", "handoff": True, "next": "Supervisor", "step": 1}
 
-    # 에이전트가 route / handoff / next 를 모두 채워서 준다.
-    # next 는 노드 이름이 아니라 route 값("general"/"supervisor") 그대로다.
-    result = await _agent.router_agent(state)
+    # 사내 원본과 동일: 에이전트가 route 를 판단하고,
+    # 노드가 그 값을 노드 이름으로 바꿔 next 에 싣는다.
+    result = await _agent.router_agent({
+        "messages": state.get("messages", []),
+        "model_name": state.get("model_name"),
+    })
 
-    return {**result, "step": 1}
+    route = result.get("route", "supervisor")
+    if route == "supervisor":
+        next_node = "Supervisor"
+    else:
+        next_node = "GeneralAgent"
+
+    return {"route": route, "handoff": False, "next": next_node, "step": 1}
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -287,7 +296,9 @@ def location_node(state: _state.AgentState, config, model_name: str = None) -> d
     content = "\n".join(lines) or "질의에서 캐리어 ID 를 찾지 못했습니다."
 
     return {
-        "messages": [AIMessage(content=content, name="LocationAgent")],
+        "messages": [AIMessage(content=content,
+name="LocationAgent",
+additional_kwargs={"agent_name": "LocationAgent"})],
         "facts": facts,
         "step": state.get("step", 0) + 1,
     }
@@ -316,7 +327,9 @@ def status_node(state: _state.AgentState, config, model_name: str = None) -> dic
     content = "\n".join(lines) or "질의에서 캐리어 ID 를 찾지 못했습니다."
 
     return {
-        "messages": [AIMessage(content=content, name="StatusAgent")],
+        "messages": [AIMessage(content=content,
+name="StatusAgent",
+additional_kwargs={"agent_name": "StatusAgent"})],
         "step": state.get("step", 0) + 1,
     }
 
@@ -351,7 +364,9 @@ def log_node(state: _state.AgentState, config, model_name: str = None) -> dict:
     )
 
     return {
-        "messages": [AIMessage(content=content, name="LogAgent")],
+        "messages": [AIMessage(content=content,
+name="LogAgent",
+additional_kwargs={"agent_name": "LogAgent"})],
         "facts": {"log_analysis": analysis},
         "step": state.get("step", 0) + 1,
     }
@@ -392,7 +407,9 @@ def extract_node(state: _state.AgentState, config, model_name: str = None) -> di
                f"carrier_ids={carriers or '없음'}, eqp_ids={eqps or '없음'}")
 
     return {
-        "messages": [AIMessage(content=content, name="ExtractAgent")],
+        "messages": [AIMessage(content=content,
+name="ExtractAgent",
+additional_kwargs={"agent_name": "ExtractAgent"})],
         # 추출 결과는 facts 에도 넣어둔다 (limiter 에 안 잘리는 공유 팩트)
         "facts": {"extracted": {"fab": fab, "carrier_ids": carriers,
                                 "eqp_ids": eqps}},
@@ -421,7 +438,9 @@ async def final_node(state: _state.AgentState, config, model_name: str = None) -
     content = await agent(state, config=config, context=context)
 
     return {
-        "messages": [AIMessage(content=content, name="FinalAnswerAgent")],
+        "messages": [AIMessage(content=content,
+name="FinalAnswerAgent",
+additional_kwargs={"agent_name": "FinalAnswerAgent"})],
         "next": "END",
         "step": state.get("step", 0) + 1,
     }
@@ -442,7 +461,9 @@ async def final_general_node(state: _state.AgentState, config, model_name: str =
     content = await agent(state, config=config, context=context)
 
     return {
-        "messages": [AIMessage(content=content, name="FinalGeneralAgent")],
+        "messages": [AIMessage(content=content,
+name="FinalGeneralAgent",
+additional_kwargs={"agent_name": "FinalGeneralAgent"})],
         "next": "END",
         "step": state.get("step", 0) + 1,
     }

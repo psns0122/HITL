@@ -15,7 +15,7 @@ app/      origin + HITL ActionAgent. 이 저장소에서 실제로 도는 코드
 
 1. **origin 에 있는 함수/파일은 시그니처·반환 형태·이름을 origin 과 맞춘다.**
    같은 일을 하는 코드가 양쪽에서 다르게 생기면 이식 때 병합 지옥이 된다.
-2. **새 기능은 가능하면 새 파일로 붙인다** (예: `app/_action.py`, `app/_registry.py`, `app/id_reader.py`).
+2. **새 기능은 가능하면 새 파일로 붙인다** (예: `app/_action.py`, `app/id_reader.py`).
    기존 파일 수정은 "몇 줄 추가" 수준으로 유지한다 — 통째 재작성 금지.
 3. **origin 과 일부러 다르게 가는 부분은 그 파일에 주석으로 이유를 남긴다.**
    이유를 못 쓰겠으면 다르게 갈 이유가 없는 것이다.
@@ -47,12 +47,12 @@ app/      origin + HITL ActionAgent. 이 저장소에서 실제로 도는 코드
 
 | 항목 | origin | app | 비고 |
 |---|---|---|---|
-| ActionAgent | 일반 react agent | 턴 기반 HITL 단일 노드 (`app/_action.py`) | **이번 작업의 본체** — 통째 복사 |
+| ActionAgent | 일반 react agent | 턴 기반 HITL 단일 노드 (`app/_action.py`) | **이번 작업의 본체** — 통째 복사. 액션 선언은 `_prompt.action_catalog()`, 툴 바인딩은 네이밍 규칙 |
 | Supervisor | LLM 배분만 | + needs-핸드오프 / Extract 선행 / HITL 턴 종료 우선순위 | 병합 필요 |
 | AgentState | messages/route/handoff/next/step/model_name | + `action`, `facts` | 필드 추가 |
-| Router 의 next | 노드 이름("Supervisor"/"GeneralAgent") | route 값("supervisor"/"general") | **app 을 origin 쪽으로 수렴시킬 것** |
-| 에이전트 이름 표기 | `additional_kwargs["agent_name"]` | `AIMessage(name=...)` | **app 을 origin 쪽으로 수렴시킬 것** |
-| model_name 전달 | state + `config.configurable` 둘 다 | state 만 | 수렴 검토 |
+| Router 의 next | 노드 이름("Supervisor"/"GeneralAgent") | 동일 (수렴 완료) | — |
+| 에이전트 이름 표기 | `additional_kwargs["agent_name"]` | 동일 + `name=` 폴백 병기 (수렴 완료) | 판독은 `_util.agent_name_of` |
+| model_name 전달 | state + `config.configurable` 둘 다 | 동일 (수렴 완료) | — |
 | 스트림 | raw text | SSE 5 이벤트 (`docs/API.md`) | app 확장 — 이식 시 routes 병합 |
 | ID 판독 | `params_extract_tool` (DB) | `app/id_reader.py` | **id_reader 는 이식하지 않는다** — 사내에선 params_extract_tool 을 부른다 |
 
