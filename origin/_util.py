@@ -6,10 +6,11 @@
   last_user_text         : 마지막 사용자 발화 텍스트
   extract_json_object    : 응답 문자열에서 JSON 객체 하나 꺼내기
   message_content_to_text: LLM content 를 문자열로 정규화
+  normalize_route_label  : 라우터 응답을 general / supervisor 로 정규화
 """
 import json
 import re
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Literal, Optional, Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
@@ -193,3 +194,39 @@ def message_content_to_text(content: Any) -> str:
         return "\n".join(parts).strip()
 
     return str(content).strip()
+
+
+def normalize_route_label(raw: str) -> Literal["general", "supervisor"]:
+    """라우터 응답을 general / supervisor 로 정규화한다.
+
+    1) JSON 으로 왔으면 route 키를 본다
+    2) 아니면 본문에서 먼저 나오는 라벨 단어를 찾는다
+    3) 둘 다 실패하면 general 로 떨어진다
+    """
+    text = (raw or "").strip()
+    parsed = extract_json_object(text)
+
+    if parsed:
+        route_value = str(parsed.get("route", "")).strip().upper()
+
+        if route_value in {"SUPERVISOR", "SUPERVISOR_AGENT"}:
+            return "supervisor"
+
+        if route_value in {"GENERAL", "GENERAL_AGENT"}:
+            return "general"
+
+    upper_text = text.upper()
+
+    first_label = re.search(
+        r"\b(SUPERVISOR_AGENT|SUPERVISOR|GENERAL_AGENT|GENERAL)\b", upper_text)
+
+    if first_label:
+        label = first_label.group(1)
+
+        if label in {"SUPERVISOR", "SUPERVISOR_AGENT"}:
+            return "supervisor"
+
+        if label in {"GENERAL", "GENERAL_AGENT"}:
+            return "general"
+
+    return "general"
