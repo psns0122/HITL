@@ -11,8 +11,9 @@ import app.config as cfg
 
 def require_gateway():
     """게이트웨이에 실제로 한 번 붙어 보고, 안 되면 이유를 찍고 종료한다."""
-    print(f"[preflight] gateway={cfg.GATEWAY_BASE_URL} "
-          f"model={cfg.CHAT_MODEL or '(기본값)'}", flush=True)
+    from app import _llm
+    print(f"[preflight] gateway={cfg.API_BASE_TEMPLATE} "
+          f"model={_llm._DEFAULT_MODEL}", flush=True)
 
     try:
         from langchain_core.messages import HumanMessage

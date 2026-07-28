@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from app import _agent, _state
 from app._util import (
+    action_service,
     agent_ran_this_turn,
     emit,
     last_user_text,
@@ -415,6 +416,13 @@ additional_kwargs={"agent_name": "ExtractAgent"})],
                                 "eqp_ids": eqps}},
         "step": state.get("step", 0) + 1,
     }
+
+
+# *************  [app — origin 의 action_node(react agent) 를 통째 교체]  *************
+async def action_node(state: _state.AgentState, config) -> dict:
+    """명령 실행 — 턴 기반 HITL 상태기계 (_util.ActionService 에 위임)."""
+    return await action_service.action_node(state, config)
+# *************
 
 
 # ─────────────────────────────────────────────────────────────────────────

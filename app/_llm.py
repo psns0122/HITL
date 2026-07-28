@@ -1,52 +1,128 @@
-"""LLM 래퍼.
+"""LLM 팩토리.
 
-프론트에서 모델을 골라 보내면 그 모델로 그래프를 돌린다.
-model_name 이 None 이면 .env 의 기본 모델(LLM_CHAT_MODEL)을 쓴다.
-
-사내 OpenAI 호환 게이트웨이(ChatOpenAI)로 붙는다.
+origin/_llm.py 와 동일하다. app 추가분은 ************* 로 표시.
 """
+from typing import Dict
+
+import requests
+from langchain_openai import ChatOpenAI
+
 import app.config as cfg
 
+_llm_cache: Dict[str, ChatOpenAI] = {}
 
-# ─────────────────────────────────────────────────────────────────────────
-# 프론트에 노출할 모델 목록
-#   게이트웨이의 /models 응답과 같은 모양으로 돌려준다.
-#   {"object": "list", "data": [{"id": ..., "object": "model", ...}]}
-# ─────────────────────────────────────────────────────────────────────────
+_DEFAULT_MODEL = "GaiA-LLM-Latest"
+
+
+def getmodellist(api_base, output=False, name=None, k=None):
+    """게이트웨이의 모델 목록을 조회해 모델명 하나를 골라 돌려준다.
+
+    Args:
+        api_base : 게이트웨이 구분자. API_BASE_TEMPLATE 에 끼워진다.
+        output   : True 면 조회된 모델 목록을 출력한다.
+        name     : 이 이름이 목록에 있으면 그것을 고른다.
+        k        : name 으로 못 골랐을 때 목록의 k 번째를 고른다.
+
+    못 고르면 None 을 돌려준다.
+    """
+    base_url = cfg.API_BASE_TEMPLATE.format(api_base=api_base)
+    get_model_url = f"{base_url}{cfg.MODEL_LIST_ENDPOINT}"
+
+    HEADERS = {
+        "accept": "*/*",
+        "Authorization": f"Bearer {cfg.api_key}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.get(get_model_url, headers=HEADERS)
+    selected_model = None
+
+    if response.status_code == 200:
+        raw_data = response.json()
+
+        # 표준 OpenAI 형식은 {"data": [...]} 이지만 리스트로 바로 오는 경우도 있다
+        if isinstance(raw_data, dict) and "data" in raw_data:
+            models = raw_data["data"]
+        else:
+            models = raw_data
+
+        # output=True 면 목록을 찍어 준다
+        if output:
+            print(f"[LLM] 모델 목록 {len(models)}건")
+            for i, model in enumerate(models):
+                model_id = model.get("id", model) if isinstance(model, dict) else model
+                print(f"  [{i}] {model_id}")
+
+        # 1) 이름으로 찾기
+        if name:
+            for model in models:
+                if isinstance(model, dict):
+                    if model.get("id") == name:
+                        selected_model = name
+                        break
+                elif model == name:
+                    selected_model = name
+                    break
+
+        # 2) 이름으로 못 찾았으면 인덱스로 찾기
+        if not selected_model and k is not None:
+            try:
+                target = models[k]
+                selected_model = target.get("id", target) if isinstance(target, dict) else target
+            except Exception:
+                print("[ERROR] list index out of range")
+
+    else:
+        print(response.status_code, response.text)
+        selected_model = None
+
+    return selected_model
+
+
+def get_llm(model_name: str = None, temperature: float = 0) -> ChatOpenAI:
+    """에이전트 공용 LLM 팩토리. (model_name, temperature) 별로 캐싱한다."""
+    if model_name is None:
+        model_name = _DEFAULT_MODEL
+
+    cache_key = f"{model_name}|{temperature}"
+
+    if cache_key in _llm_cache:
+        return _llm_cache[cache_key]
+
+    print(f"[LLM] 새 인스턴스 생성 model={model_name} temperature={temperature}", flush=True)
+
+    base_url = cfg.API_BASE_TEMPLATE.format(api_base="hcp")
+    llm = ChatOpenAI(
+        base_url=base_url,
+        # *************  [app — 사내 밖에선 키가 비어 있어 placeholder 필요]
+        api_key=cfg.api_key or "EMPTY",
+        # *************
+        model=model_name,
+        temperature=temperature,
+        streaming=True,
+    )
+
+    _llm_cache[cache_key] = llm
+    return llm
+
+
+# *************  [app 전용 — origin 에 없음]  *************
 
 # 프론트 드롭다운에 띄울 모델들. 첫 번째가 기본값이다.
-# 사내에서 게이트웨이 /models 를 직접 조회하려면 list_models() 본문만 바꾸면 된다.
 AVAILABLE_MODELS = [
-    "GaiA-LLM-Latest",            # 기본값
+    "GaiA-LLM-Latest",
     "gaia-GLM-5.2",
     "Qwen3.5-397B-A17B-FP8",
 ]
 
 
 def default_model_name() -> str:
-    """모델을 지정하지 않았을 때 쓸 기본 모델."""
-    return cfg.CHAT_MODEL or AVAILABLE_MODELS[0]
+    """모델을 지정하지 않았을 때 쓸 기본 모델 (routes /health 등이 참조)."""
+    return _DEFAULT_MODEL
 
 
 def list_models() -> dict:
-    """게이트웨이 /models 와 동일한 형태의 모델 목록.
-
-    반환 예)
-        {
-          "object": "list",
-          "data": [
-            {"id": "GaiA-LLM-Latest", "object": "model", "owned_by": "in-house"},
-            ...
-          ]
-        }
-    """
-    default = default_model_name()
-
-    # 기본 모델이 목록에 없으면 맨 앞에 끼워 넣는다
-    ids = list(AVAILABLE_MODELS)
-    if default not in ids:
-        ids.insert(0, default)
-
+    """GET /models 응답 — 게이트웨이 /models 와 같은 형태."""
     return {
         "object": "list",
         "data": [
@@ -54,47 +130,16 @@ def list_models() -> dict:
                 "id": model_id,
                 "object": "model",
                 "owned_by": "in-house",
-                "is_default": model_id == default,
+                "is_default": model_id == _DEFAULT_MODEL,
             }
-            for model_id in ids
+            for model_id in AVAILABLE_MODELS
         ],
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# LLM 팩토리
-# ─────────────────────────────────────────────────────────────────────────
-
-def get_llm(model_name: str | None = None, temperature: float | None = None):
-    """에이전트 공용 LLM 팩토리. (사내 코드의 _llm.llm_t1 자리)
-
-    Args:
-        model_name : 프론트에서 선택된 모델. None 이면 .env 기본 모델.
-        temperature: 샘플링 온도. None 이면 .env 기본값.
-
-    사내 게이트웨이는 OpenAI 호환 엔드포인트라 ChatOpenAI 로 붙는다.
-    호출 패턴은 사내 기존 프로젝트(pptx-vision-rag/llm_client.py)와 동일하게 맞췄다.
-    """
-    from langchain_openai import ChatOpenAI
-
-    return ChatOpenAI(
-        base_url=cfg.GATEWAY_BASE_URL,
-        # 게이트웨이가 키를 요구하지 않아 빈 값이 와도 동작하도록 placeholder 사용
-        # (OpenAI SDK 는 빈 키를 거부한다)
-        api_key=cfg.GATEWAY_API_KEY or "EMPTY",
-        model=model_name or default_model_name(),
-        temperature=cfg.TEMPERATURE if temperature is None else temperature,
-        max_tokens=cfg.MAX_TOKENS,
-        max_retries=cfg.LLM_MAX_RETRIES,
-        timeout=cfg.LLM_TIMEOUT,   # 무한 대기 방지 — 멈춤 대신 명확한 타임아웃 에러
-    )
-
-
-# 사내 코드 호환용 별칭 (supervisor_chain 등이 llm_t1 을 참조하는 형태)
-llm_t1 = get_llm()
-
-
 def structured_invoke(llm, schema, messages, config=None):
-    """구조화 출력. 실패 시 예외를 그대로 올려 호출부가 폴백하게 둔다."""
+    """구조화 출력 (HITL 판정용). 실패 시 예외를 그대로 올려 호출부가 폴백한다."""
     runner = llm.with_structured_output(schema)
     return runner.invoke(messages, config=config)
+
+# *************  [app 전용 끝]  *************

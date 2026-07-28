@@ -70,7 +70,7 @@ python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실
 
 ### ActionAgent 내부 논리 흐름 (⏸ = 질문 남기고 턴 종료)
 
-> 아래는 **논리 단계**입니다. 구현은 `app/_action.py` 의 노드 함수
+> 아래는 **논리 단계**입니다. 구현은 `app/_util.py 의 ActionService` 의 노드 함수
 > **하나**(action_node)이며, 단계들은 함수 안의 분기/루프입니다.
 > 턴 기반은 interrupt 재실행 격리가 필요 없어 서브그래프로 쪼갤 이유가 없습니다.
 

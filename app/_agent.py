@@ -9,7 +9,7 @@
   LocationAgent   : 캐리어 위치
   LogAgent        : 반송 이력·에러 분석
   ExtractAgent    : FAB/파라미터 추출 (모든 워커에 선행)
-  ActionAgent     : 명령 실행 (HITL — _action.py 가 담당)
+  ActionAgent     : 명령 실행 (HITL — _util.ActionService 가 담당)
   FinalAnswerAgent / FinalGeneralAgent : 최종 응답 생성(스트리밍)
 """
 from dataclasses import dataclass, field

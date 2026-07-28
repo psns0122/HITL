@@ -184,28 +184,20 @@ def fab_extract_tool(text: str) -> str:
 
 
 @tool
-def params_extract_tool(text: str) -> str:
-    """질문에서 캐리어 ID / 장비 ID 를 추출한다.
+def params_extract_tool(text: str) -> dict:
+    """발화 속 정체불명 ID 가 실제로 무엇인지 판정한다 (ID 판독기).
 
-    ExtractAgent 의 핵심 기능. 뒤에 붙는 에이전트들이 이 결과를 재료로 쓴다.
+    사내 params_extract_tool 과 같은 계약 — dict 를 돌려준다.
+    ExtractAgent 의 핵심 툴이자, ActionAgent 의 HITL 수집 루프도
+    사용자 답변을 읽을 때 이 툴을 그대로 쓴다.
     """
     print(f"[TOOL params_extract] enter text={text!r}", flush=True)
 
     ids = extract_ids(text)
-    carriers = ids.get("carrier_ids") or []
-    eqps = ids.get("eqp_ids") or []
+    print(f"[TOOL params_extract] carrier_ids={ids['carrier_ids']} "
+          f"eqp_ids={ids['eqp_ids']} unknown={ids['unknown']}", flush=True)
 
-    print(f"[TOOL params_extract] carrier_ids={carriers} eqp_ids={eqps}", flush=True)
-
-    if not carriers and not eqps:
-        return "추출된 ID 가 없습니다."
-
-    parts = []
-    if carriers:
-        parts.append(f"carrier_ids={carriers}")
-    if eqps:
-        parts.append(f"eqp_ids={eqps}")
-    return ", ".join(parts)
+    return ids
 
 
 # ─────────────────────────────────────────────────────────────────────────

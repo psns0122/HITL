@@ -136,7 +136,7 @@ def action_catalog() -> dict:
     레지스트리 클래스 대신 프롬프트 계층이 선언을 소유한다.
     새 액션 추가 = 여기 항목 1개 + _tool.py 에
     {action}_validate_tool / {action}_confirm_tool / {action}_execute_tool
-    세 개를 네이밍 규칙대로 만들면 끝. (_action.py 가 이름으로 바인딩한다)
+    세 개를 네이밍 규칙대로 만들면 끝. (_util.ActionService 가 이름으로 바인딩한다)
     """
     return {
         "transport": {
