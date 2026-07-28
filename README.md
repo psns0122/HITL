@@ -192,18 +192,17 @@ data: {"type": "needs_input", "kind": "confirm", "prompt": "...", ...}
   `fetch`/`httpx` 로 받아 빈 줄 기준으로 프레임을 갈라 파싱하세요 —
   클라이언트 구현은 `streamlit_app.py` 의 `stream_chat()` 를 그대로 가져다 쓰면 됩니다.
 
-이벤트 종류 (`token` 외에는 전부 제어 프레임):
+이벤트는 전부 5개입니다. 필드는 항상 전부 실리고, 없는 값은 `null` 입니다.
 
-| `type` | 언제 | 내용 |
+| event | data | 언제 |
 |---|---|---|
-| `node_enter` | 그래프 노드 진입 | `{agent, node}` — 트레이스 창 |
-| `tool_call` | 툴 호출 | `{agent, tool, args, result?}` |
-| `agent_status` | 에이전트 상태 한 줄 | `{agent, detail}` |
-| `needs_input` | **HITL 대기 (턴 종료)** | `{kind: collect_param\|confirm, prompt, field?, action, params, options?}` |
-| `thinking` | 중간 에이전트 토큰 (기본 off) | `{agent, text}` — `SHOW_THINKING_TOKENS=1` 일 때만 |
-| `usage` | 턴 종료 | 토큰/시간 집계 |
-| `done` | 종료 | `{reason: complete\|interrupted\|stopped\|error}` |
-| `error` | 오류 | `{message}` |
+| `token` | `{text}` | 최종 답변 토큰 |
+| `trace` | `{agent, tool, args, result}` | 트레이스. `tool=null` 은 노드 진입, 아니면 툴 실행(입력/결과가 두 프레임) |
+| `needs_input` | `{kind: collect_param\|confirm, prompt, field}` | **HITL 대기 (턴 종료)** |
+| `usage` | 토큰/시간 집계 | 턴 종료 직전 1회 |
+| `done` | `{reason: complete\|interrupted\|stopped\|error, message}` | 항상 마지막 프레임. 오류 사유는 `message` |
+
+프론트 상세 명세(예시·병합 규칙·JS 파서 포함)는 **`docs/API.md`** 입니다.
 
 `needs_input` + `done{interrupted}` 를 받으면 프론트는 입력창/승인버튼을 띄우고,
 사용자의 답을 **같은 `thread_id` 로 다시 `/chat/stream`** 에 보내면 됩니다.
@@ -353,12 +352,10 @@ HITL 때문에 한 액션이 **여러 번의 `/chat/stream`** 에 걸쳐 진행�
 
 ## 에이전트 "생각" 보여주기
 
-현재 설정은 **상태·툴 이벤트만** 트레이스로 내보냅니다 (`node_enter`, `tool_call`, `agent_status`).
-Streamlit 이 이를 `st.status` 에 흘려서 "Supervisor 판단 중… / LocationAgent 실행 / param_check_tool 호출…"
-처럼 보여줍니다.
-
-중간 에이전트의 **토큰 단위** 스트리밍이 필요하면 `.env` 의 `SHOW_THINKING_TOKENS=1` 로 켜면
-`thinking` 이벤트가 추가로 흐릅니다.
+트레이스는 `trace` 이벤트 하나로 내보냅니다 — 노드 진입(`tool=null`)과
+툴 실행(입력→결과)만. Streamlit 이 이를 `st.status` 카드에
+"▶ Supervisor / - param_check_tool 입력 → 결과" 형태로 그립니다.
+에이전트의 중간 응답이나 상태 문구는 화면에 싣지 않습니다(콘솔 로그에만 남음).
 
 ---
 

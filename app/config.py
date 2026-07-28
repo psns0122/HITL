@@ -115,8 +115,5 @@ MAX_COLLECT = _as_int("MAX_COLLECT", 5)       # 파라미터 재질문 상한
 MAX_VALIDATE = _as_int("MAX_VALIDATE", 3)     # 검증 재시도 상한
 MAX_HOPS = _as_int("MAX_HOPS", 3)             # needs-핸드오프 왕복 상한
 
-# ── 중간 에이전트 토큰 스트리밍(thinking 채널) ────────────────────────────
-SHOW_THINKING_TOKENS = _as_bool(_get("SHOW_THINKING_TOKENS", "0"))
-
 # ── 디버그 ────────────────────────────────────────────────────────────────
 DEBUG = _as_bool(_get("DEBUG", "false"))

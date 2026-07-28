@@ -88,6 +88,17 @@ def _token(text: str) -> str:
     return f"event: token\ndata: {data}\n\n"
 
 
+def _trace(agent, tool=None, args=None, result=None) -> str:
+    """트레이스 프레임. 노드 진입과 툴 실행을 하나의 이벤트로 합쳤다.
+
+    필드는 항상 4개 전부 실린다 (없으면 null).
+      tool == null : 노드 진입
+      tool != null : 툴 실행 (args=입력, result=결과 — 시작/종료에 나눠 옴)
+    """
+    return _event({"type": "trace", "agent": agent,
+                   "tool": tool, "args": args, "result": result})
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # 로그 (shared_code.md §6 포맷 유지)
 # ─────────────────────────────────────────────────────────────────────────
@@ -263,8 +274,6 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
     if resuming:
         kind = awaiting_before.get("type", "collect_param")
         print(f"[STREAM] thread={thread_id} HITL 답변({kind}) <- {req.query!r}", flush=True)
-        yield _event({"type": "agent_status", "agent": "HITL",
-                      "detail": f"사용자 응답 수신({kind}) — Router/Supervisor 경유 재개"})
     else:
         print(f"[STREAM] thread={thread_id} NEW TURN <- {req.query!r}", flush=True)
 
@@ -291,7 +300,7 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
                 if not step_history or step_history[-1] != node:
                     step_history.append(node)
                     usage_store.add_step(thread_id, node)
-                    yield _event({"type": "node_enter", "agent": node, "node": node})
+                    yield _trace(node)
                 last_recorded_node = node
 
             # --- 최종 답변 토큰: event "token" 으로 흘린다
@@ -309,11 +318,6 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
                         print(text, end="", flush=True)
                         yield _token(text)
 
-                elif cfg.SHOW_THINKING_TOKENS:
-                    # 기본 off. 켜면 중간 에이전트 토큰도 트레이스로 흐른다.
-                    text = getattr(chunk, "content", None)
-                    if text:
-                        yield _event({"type": "thinking", "agent": node, "text": text})
 
             # --- 토큰 사용량 누적
             elif event_type == "on_chat_model_end":
@@ -322,31 +326,31 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
                 if usage:
                     usage_store.add_usage(thread_id, node or "?", dict(usage))
 
-            # --- 툴 호출 로깅
+            # --- 툴 시작: 입력을 trace 로
             elif event_type == "on_tool_start":
-                payload = {
-                    "agent": node,
-                    "tool": ev.get("name"),
-                    "args": (ev.get("data") or {}).get("input"),
-                }
-                usage_store.add_tool_call(thread_id, payload)
-                print(f"[TOOL-EVENT] {payload['tool']} args={payload['args']}", flush=True)
-                yield _event({"type": "tool_call", **payload})
+                tool = ev.get("name")
+                args = (ev.get("data") or {}).get("input")
+                usage_store.add_tool_call(thread_id, {"agent": node, "tool": tool,
+                                                      "args": args})
+                print(f"[TOOL-EVENT] {tool} args={args}", flush=True)
+                yield _trace(node, tool=tool, args=args)
 
-            # --- 툴 결과 (실제 LLM 모드의 ReAct 툴). 입력은 위 start 에서, 결과는 여기서.
+            # --- 툴 종료: 결과를 trace 로 (같은 tool 의 입력 줄에 프론트가 병합)
             elif event_type == "on_tool_end":
                 out = (ev.get("data") or {}).get("output")
                 result = getattr(out, "content", out)   # ToolMessage 면 content
-                yield _event({"type": "tool_call", "agent": node,
-                              "tool": ev.get("name"), "result": result})
+                yield _trace(node, tool=ev.get("name"), result=result)
 
-            # --- 노드가 emit() 한 상세 트레이스
+            # --- 노드가 emit() 한 상세 트레이스.
+            #     tool_call 만 trace 로 내보내고 나머지(agent_status 등)는
+            #     콘솔 로그 전용으로 삼켜 프레임 수를 줄인다.
             elif event_type == "on_custom_event":
                 name = ev.get("name")
                 data = ev.get("data") or {}
                 if name == "tool_call":
                     usage_store.add_tool_call(thread_id, data)
-                yield _event({"type": name, **data})
+                    yield _trace(data.get("agent"), tool=data.get("tool"),
+                                 args=data.get("args"), result=data.get("result"))
 
     except asyncio.CancelledError:
         # 클라이언트가 연결을 끊은 경우
@@ -355,8 +359,7 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
 
     except Exception as e:
         print(f"\n[ERROR] stream failed: {e}", flush=True)
-        yield _event({"type": "error", "message": str(e)})
-        yield _event({"type": "done", "reason": "error"})
+        yield _event({"type": "done", "reason": "error", "message": str(e)})
         _write_turn_log(thread_id, "error", effective_model_name)
         return
 
@@ -375,7 +378,7 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
         snap = None
 
     if stopped:
-        yield _event({"type": "done", "reason": "stopped"})
+        yield _event({"type": "done", "reason": "stopped", "message": None})
         _write_turn_log(thread_id, "stopped", effective_model_name)
         return
 
@@ -385,24 +388,23 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
         usage_store.mark_paused(thread_id)
         print(f"[STREAM] thread={thread_id} ⏸ HITL 대기: {payload.get('type')}", flush=True)
 
-        # payload 의 'type'(collect_param/confirm)은 프레임의 'type' 과
-        # 충돌하므로 'kind' 로 옮겨 싣는다.
-        body = {k: v for k, v in payload.items() if k != "type"}
+        # 프론트에 필요한 세 필드만 싣는다. (질문 문구에 이미 파라미터가
+        # 다 들어 있으므로 action/params 원본은 보내지 않는다)
         yield _event({
             "type": "needs_input",
-            "kind": payload.get("type"),
-            "step_history": step_history,
-            **body,
+            "kind": payload.get("type"),          # collect_param | confirm
+            "prompt": payload.get("prompt"),
+            "field": payload.get("field"),        # confirm 이면 null
         })
         # HITL 로 멈춘 턴에도 지금까지의 토큰/시간 집계를 보낸다.
         # (원장은 닫지 않는다 — 다음 턴 답변까지 이어서 누적)
         yield _event({"type": "usage", **usage_store.totals(thread_id)})
-        yield _event({"type": "done", "reason": "interrupted"})
+        yield _event({"type": "done", "reason": "interrupted", "message": None})
         return
 
     # --- 정상 완료
     yield _event({"type": "usage", **usage_store.totals(thread_id)})
-    yield _event({"type": "done", "reason": "complete", "step_history": step_history})
+    yield _event({"type": "done", "reason": "complete", "message": None})
     _write_turn_log(thread_id, "complete", effective_model_name)
 
 

@@ -301,24 +301,25 @@ def send(query: str):
                 ev = item
                 t = ev.get("type")
 
-                # 카드에 담는 건 node_enter / tool_call 뿐이다.
-                # agent_status(상태 문구)와 thinking(중간 응답 토큰)은 버린다.
-                if t == "node_enter":
-                    trace.append(f"{NODE_ICON} **{ev['agent']}**")
-                    redraw_trace()
-                    status.update(label=f"{ev['agent']} 실행 중…", expanded=True)
-                    if ev["agent"] in ("FinalAnswerAgent", "FinalGeneralAgent"):
-                        final_agent = ev["agent"]
-
-                elif t == "tool_call":
-                    # 툴 하나 = 한 줄: `- tool 입력: … → 결과: …`
-                    #
-                    # ReAct 툴은 입력(on_tool_start)과 결과(on_tool_end)가
-                    # 두 프레임으로 나뉘어 온다. 결과만 온 프레임은 같은 툴의
-                    # '결과 없는 줄' 을 뒤에서부터 찾아 이어 붙인다.
-                    # 카드는 trace 리스트를 통째로 다시 그리므로(redraw_trace)
-                    # 이미 그린 줄도 제자리에서 갱신된다.
+                # 트레이스는 이벤트 하나(trace)로 온다.
+                #   tool == null : 노드 진입  -> `▶ agent`
+                #   tool != null : 툴 실행    -> `- tool 입력 → 결과` 한 줄
+                if t == "trace":
                     tool = ev.get("tool")
+
+                    if not tool:
+                        # 노드 진입
+                        trace.append(f"{NODE_ICON} **{ev['agent']}**")
+                        redraw_trace()
+                        status.update(label=f"{ev['agent']} 실행 중…", expanded=True)
+                        if ev["agent"] in ("FinalAnswerAgent", "FinalGeneralAgent"):
+                            final_agent = ev["agent"]
+                        continue
+
+                    # 툴 실행. 입력(시작)과 결과(종료)가 두 프레임으로 나뉘어
+                    # 오므로, 결과만 온 프레임은 같은 툴의 '결과 없는 줄' 을
+                    # 뒤에서부터 찾아 이어 붙인다. 카드는 trace 리스트를 통째로
+                    # 다시 그리므로(redraw_trace) 이미 그린 줄도 제자리에서 갱신된다.
                     args = ev.get("args")
                     result = ev.get("result")
 
@@ -347,7 +348,7 @@ def send(query: str):
                 elif t == "usage":
                     usage = ev
 
-                elif t == "error":
+                elif t == "done" and ev.get("reason") == "error":
                     st.error(ev.get("message"))
 
         except Exception as e:

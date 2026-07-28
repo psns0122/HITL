@@ -98,8 +98,9 @@ async def main():
         assert ni["kind"] == "collect_param" and ni.get("field") == "eqp_id", ni
         assert first(ev, "done")["reason"] == "interrupted"
 
-        # ExtractAgent 가 워커 중 가장 먼저 돌았는지
-        nodes = [e["agent"] for e in ev if e["type"] == "node_enter"]
+        # ExtractAgent 가 워커 중 가장 먼저 돌았는지 (trace 중 tool 없는 것 = 노드 진입)
+        nodes = [e["agent"] for e in ev
+                 if e["type"] == "trace" and not e.get("tool")]
         assert "ExtractAgent" in nodes, nodes
         assert nodes.index("ExtractAgent") < nodes.index("ActionAgent"), nodes
         print(f"1) 신규 턴 -> HITL, ExtractAgent 선행 PASS (nodes={nodes})")
@@ -108,7 +109,7 @@ async def main():
         _, ev = await stream(client, "sse-A", "STK102 로 보내줘")
         ni = first(ev, "needs_input")
         assert ni and ni["kind"] == "confirm", ni
-        assert ni.get("params", {}).get("eqp_id") == "STK102", ni
+        assert "STK102" in ni["prompt"], ni           # 확정된 목적지가 질문 문구에 포함
         print("2) resume -> confirm PASS")
 
         # ── 3) 승인 -> 최종 답변이 raw text 로 흘러야 한다
@@ -163,8 +164,9 @@ async def main():
         # ── 7) needs-핸드오프
         _, ev = await stream(client, "sse-D", "6PDMQ283 를 9ZXCV456 있는 위치로 반송해줘")
         ni = first(ev, "needs_input")
-        assert ni and ni.get("params", {}).get("eqp_id") == "STK102", ni
-        nodes = [e["agent"] for e in ev if e["type"] == "node_enter"]
+        assert ni and "STK102" in ni["prompt"], ni    # 헬퍼가 채운 목적지가 질문 문구에 포함
+        nodes = [e["agent"] for e in ev
+                 if e["type"] == "trace" and not e.get("tool")]
         assert "LocationAgent" in nodes and "ActionAgent" in nodes, nodes
         print(f"7) needs-핸드오프 PASS (nodes={nodes})")
 
@@ -184,9 +186,9 @@ async def main():
 
         # ── 10) recursion_limit 이 요청대로 먹는가 (1 이면 즉시 한도 초과)
         _, ev = await stream(client, "sse-G", "6PDMQ283 위치 알려줘", recursion_limit=1)
-        err = first(ev, "error")
-        assert err and "recursion" in err["message"].lower(), ev
-        assert first(ev, "done")["reason"] == "error"
+        d = first(ev, "done")
+        assert d and d["reason"] == "error", ev
+        assert "recursion" in (d.get("message") or "").lower(), d
         print("10) recursion_limit 반영 PASS")
 
         # ── 11) 스키마 검증: 범위 밖 recursion_limit 은 거부
