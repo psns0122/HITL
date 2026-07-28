@@ -18,6 +18,8 @@ ActionAgent 자리에만 HITL 서브그래프를 끼워 넣는다.
 그래서 사용자 질의가 들어오면 언제나 Supervisor 부터 다시 판단하게 되고,
 Supervisor 가 그 턴의 첫 워커로 ExtractAgent 를 태운다.
 """
+import functools
+
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
@@ -35,13 +37,14 @@ from app.actions.node import build_action_node
 SHARED_CHECKPOINTER = InMemorySaver()   # (구)MemorySaver — langgraph 1.x 표준명
 
 
-def build_team_graph():
+def build_team_graph(model_name: str = None, checkpointer=None):
     """그래프와 체크포인터를 만들어 돌려준다.
 
-    매개변수는 없다 (사내 원본과 동일).
-    - 모델명은 빌더가 아니라 state["model_name"] 으로 흐른다.
-      노드가 실행 시점에 읽으므로 그래프를 모델별로 만들 이유가 없다.
-    - 체크포인터는 프로세스 공용 SHARED_CHECKPOINTER 하나다.
+    Args:
+        model_name: 프론트에서 고른 모델. 노드가 partial 로 받아 쓴다.
+                    (실행 시점에는 state["model_name"] 이 우선한다)
+        checkpointer: 쓸 체크포인터. None 이면 프로세스 공용 것을 쓴다.
+                      테스트에서 스레드 상태를 격리하고 싶을 때만 따로 넘긴다.
     """
     workflow = StateGraph(_state.AgentState)
 
@@ -50,19 +53,24 @@ def build_team_graph():
     workflow.add_node("GeneralAgent", _node.general_node)
     workflow.add_node("Supervisor", _node.supervisor_node)
 
+    workflow.add_node("StatusAgent",
+                      functools.partial(_node.status_node, model_name=model_name))
     # 워커에는 needs-핸드오프 관련 래핑이 전혀 없다. 상담 배분과 답변 회수는
     # 전부 Supervisor 가 하고, 워커는 대화에 실려 온 질의만 평소처럼 처리한다.
-    # 모델명도 안 넘긴다 — 노드가 state["model_name"] 을 직접 읽는다.
-    workflow.add_node("StatusAgent", _node.status_node)
-    workflow.add_node("LocationAgent", _node.location_node)
-    workflow.add_node("LogAgent", _node.log_node)
-    workflow.add_node("ExtractAgent", _node.extract_node)
+    workflow.add_node("LocationAgent",
+                      functools.partial(_node.location_node, model_name=model_name))
+    workflow.add_node("LogAgent",
+                      functools.partial(_node.log_node, model_name=model_name))
+    workflow.add_node("ExtractAgent",
+                      functools.partial(_node.extract_node, model_name=model_name))
 
     # ActionAgent = 턴 기반 HITL 단일 노드 (actions/node.py)
     workflow.add_node("ActionAgent", build_action_node())
 
-    workflow.add_node("FinalAnswerAgent", _node.final_node)
-    workflow.add_node("FinalGeneralAgent", _node.final_general_node)
+    workflow.add_node("FinalAnswerAgent",
+                      functools.partial(_node.final_node, model_name=model_name))
+    workflow.add_node("FinalGeneralAgent",
+                      functools.partial(_node.final_general_node, model_name=model_name))
 
     # --- 배선
     # 워커는 실행 후 무조건 Supervisor 로 복귀한다
@@ -97,7 +105,8 @@ def build_team_graph():
     workflow.add_edge("FinalAnswerAgent", END)
     workflow.add_edge("FinalGeneralAgent", END)
 
-    # HITL 은 체크포인터가 있어야 동작한다 (진행 상태 보관/재개)
-    graph = workflow.compile(checkpointer=SHARED_CHECKPOINTER)
+    # HITL 은 체크포인터가 있어야 동작한다 (interrupt 후 재개)
+    checkpointer = checkpointer or SHARED_CHECKPOINTER
+    graph = workflow.compile(checkpointer=checkpointer)
 
-    return graph, SHARED_CHECKPOINTER
+    return graph, checkpointer

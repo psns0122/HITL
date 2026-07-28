@@ -154,7 +154,7 @@ async def main():
         assert r.json()["mode"] == "aborted_action", r.text
 
         from app.api.graph_service import get_team_graph
-        graph, _ = get_team_graph()
+        graph, _ = await get_team_graph(None)
         snap = await graph.aget_state({"configurable": {"thread_id": "sse-C"}})
         assert not ((snap.values or {}).get("action") or {}), (snap.values or {}).get("action")
         print("6) /chat/stop (액션 스크래치 정리) PASS")
@@ -173,16 +173,13 @@ async def main():
         assert first(ev, "done")["reason"] == "complete"
         print("8) 일반 질의 PASS")
 
-        # ── 9) 모델을 바꿔도 같은 그래프 한 벌로 처리되는가
-        #      (그래프는 프로세스에 하나 — 모델은 state["model_name"] 으로 흐른다)
+        # ── 9) 모델을 바꾸면 그래프가 모델별로 캐싱되는가
         _, ev = await stream(client, "sse-F", "안녕!", model_name="gaia-GLM-5.2")
         assert first(ev, "done")["reason"] == "complete", kinds(ev)
 
-        from app.api.graph_service import get_team_graph
-        g1, _ = get_team_graph()
-        g2, _ = get_team_graph()
-        assert g1 is g2
-        print("9) 단일 그래프 + state 모델 전달 PASS")
+        from app.api.graph_service import cached_models
+        assert "gaia-GLM-5.2" in cached_models(), cached_models()
+        print(f"9) 모델별 그래프 캐싱 PASS (cached={cached_models()})")
 
         # ── 10) recursion_limit 이 요청대로 먹는가 (1 이면 즉시 한도 초과)
         _, ev = await stream(client, "sse-G", "6PDMQ283 위치 알려줘", recursion_limit=1)

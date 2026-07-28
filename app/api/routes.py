@@ -49,7 +49,7 @@ import app.config as cfg
 from app import _llm
 from app._node import members
 from app.api import usage_store
-from app.api.graph_service import get_team_graph
+from app.api.graph_service import cached_models, get_team_graph
 from app.api.schemas import ChatRequest, ChatResponse, StopRequest
 
 router = APIRouter()
@@ -221,8 +221,7 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
     effective_model_name = req.model_name
 
     # 모델별로 캐싱된 그래프를 가져온다
-    # 그래프는 프로세스에 한 벌 — 모델은 state["model_name"] 으로 흘러간다
-    team_graph, _ = get_team_graph()
+    team_graph, _ = await get_team_graph(model_name=effective_model_name)
 
     config = {
         "configurable": {
@@ -437,7 +436,7 @@ async def chat_stop(req: StopRequest, request: Request):
     thread_id = req.thread_id
     flags = _stop_flags(request)
 
-    graph, _ = get_team_graph()
+    graph, _ = await get_team_graph(None)
     config = {"configurable": {"thread_id": thread_id}}
 
     snap = await graph.aget_state(config)
@@ -474,5 +473,6 @@ async def health():
     return {
         "ok": True,
         "default_model": _llm.default_model_name(),
+        "cached_graphs": cached_models(),
         "time": kst_now_iso(),
     }

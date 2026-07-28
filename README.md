@@ -231,20 +231,21 @@ ActionAgent 로 보냅니다. (HITL 답변이라고 그래프 중간으로 직�
 목록은 `app/_llm.py` 의 `AVAILABLE_MODELS` 에 하드코딩되어 있습니다.
 게이트웨이에서 직접 받아오려면 `list_models()` 본문만 바꾸면 됩니다.
 
-### 그래프는 프로세스에 한 벌
+### 모델별 그래프 캐싱
 
-LangGraph 빌드는 무거워서 매 요청마다 만들 수 없습니다. 그래서
-`app/api/graph_service.py` 가 프로세스에 **한 벌만** 만들어 재사용합니다
-(사내 원본과 동일).
+LangGraph 빌드는 무거워서 매 요청마다 만들 수 없고, 하나만 만들어 두면 모델 변경이
+반영되지 않습니다. 그래서 `app/api/graph_service.py` 가 **모델명을 키로** 캐싱합니다.
 
 ```python
-graph, checkpointer = build_team_graph()   # 매개변수 없음
+_dynamic_graph_cache: Dict[str, dict] = {}   # model_name -> {graph, checkpointer}
+_lock = asyncio.Lock()
+
+async def get_team_graph(model_name=None):
+    cache_key = model_name if model_name else "default"
+    ...
 ```
 
-모델별 캐시는 없습니다 — 프론트가 고른 모델은 빌더가 아니라
-`state["model_name"]` 으로 흐르고, 각 노드가 실행 시점에 읽습니다.
-그래서 모델을 바꿔도 같은 그래프·같은 체크포인터로 이어지고,
-승인 대기 중 모델을 바꿔도 HITL 이 끊기지 않습니다.
+체크포인터도 그래프와 짝으로 같이 캐싱합니다 (HITL 재개가 체크포인터에 붙어 있으므로).
 
 ---
 
@@ -395,7 +396,7 @@ app/
     ├── main.py          # FastAPI 엔트리 (lifespan: MCP connect/disconnect)
     ├── routes.py        # /chat/stream, /chat/stop, /models, 일별 jsonl 로그
     ├── usage_store.py   # thread_id 별 토큰/시간 원장
-    ├── graph_service.py # 프로세스 공용 그래프 한 벌 (모델은 state 로 흐름)
+    ├── graph_service.py # 모델명 키 그래프 캐시
     └── schemas.py       # ChatRequest / ChatResponse / StopRequest
 
 origin/                  # ← HITL 이전 사내 원본 (비교 전용, 실행 안 함)
