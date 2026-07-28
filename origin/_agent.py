@@ -232,3 +232,81 @@ def create_action_agent(model_name: str = None):
         ]),
         prompt=_prompt.action_agent_prompt().strip(),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 최종 응답 에이전트
+#   react agent 가 아니다. prompt | llm 체인을 만들고 _ainvoke 를 돌려준다.
+#   사용자가 토큰 스트리밍으로 보게 되는 건 이 둘의 출력뿐이다.
+# ─────────────────────────────────────────────────────────────────────────
+
+def create_final_agent(model_name: str = None):
+    """워커 결과를 받아 최종 답변을 만든다."""
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", _prompt.final_agent_prompt().strip()),
+        MessagesPlaceholder("messages"),
+    ])
+    chain = prompt | _llm.get_llm(model_name, temperature=0.2)
+
+    async def _ainvoke(state: _state.AgentState) -> Dict[str, Any]:
+        raw_messages = state.get("messages", []) or []
+
+        # 1. 오염된 메세지 필터링
+        messages = []
+        for m in raw_messages:
+            if isinstance(m, AIMessage):
+                c = m.content if isinstance(m.content, str) else str(m.content)
+                if not c.strip():
+                    continue
+                messages.append(AIMessage(content=c))
+            else:
+                messages.append(m)
+
+        # 2. LLM 호출 + 빈 응답이면 1회 재시도
+        for attempt in range(2):
+            resp = await chain.ainvoke({"messages": messages})
+            c = resp.content if isinstance(resp.content, str) else str(resp.content)
+            if c.strip():
+                return {"messages": [resp]}
+            print(f"[ERROR] FINAL 응답 재시도 중, retry {attempt + 1}")
+
+        # 여전히 비어있는 응답이라면 폴백
+        return {"messages": [AIMessage(content="응답 생성에 실패했습니다. 다시 시도해주세요.")]}
+
+    return _ainvoke
+
+
+def create_final_general_agent(model_name: str = None):
+    """일반 대화의 최종 답변. create_final_agent 와 프롬프트만 다르다."""
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", _prompt.final_general_agent_prompt().strip()),
+        MessagesPlaceholder("messages"),
+    ])
+    chain = prompt | _llm.get_llm(model_name, temperature=0.2)
+
+    async def _ainvoke(state: _state.AgentState) -> Dict[str, Any]:
+        raw_messages = state.get("messages", []) or []
+
+        # 1. 오염된 메세지 필터링
+        messages = []
+        for m in raw_messages:
+            if isinstance(m, AIMessage):
+                c = m.content if isinstance(m.content, str) else str(m.content)
+                if not c.strip():
+                    continue
+                messages.append(AIMessage(content=c))
+            else:
+                messages.append(m)
+
+        # 2. LLM 호출 + 빈 응답이면 1회 재시도
+        for attempt in range(2):
+            resp = await chain.ainvoke({"messages": messages})
+            c = resp.content if isinstance(resp.content, str) else str(resp.content)
+            if c.strip():
+                return {"messages": [resp]}
+            print(f"[ERROR] FINAL 응답 재시도 중, retry {attempt + 1}")
+
+        # 여전히 비어있는 응답이라면 폴백
+        return {"messages": [AIMessage(content="응답 생성에 실패했습니다. 다시 시도해주세요.")]}
+
+    return _ainvoke
