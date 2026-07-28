@@ -35,16 +35,6 @@ API_BASE_TEMPLATE = _get("API_BASE_TEMPLATE", "http://hcp.llm.skhynix.com/v1")
 MODEL_LIST_ENDPOINT = _get("MODEL_LIST_ENDPOINT", "/models")
 api_key = _get("LLM_GATEWAY_API_KEY", "")
 
-LLM_GATEWAY_BASE_URL = _get("LLM_GATEWAY_BASE_URL", "http://hcp.llm.skhynix.com/v1")
-
-# 사내 게이트웨이는 인증 키를 요구하지 않아 빈 값을 허용한다.
-LLM_GATEWAY_API_KEY = api_key
-
-LLM_CHAT_MODEL = _get("LLM_CHAT_MODEL", "GaiA-LLM-Latest")
-LLM_MAX_TOKENS = int(_get("LLM_MAX_TOKENS", "4000"))
-LLM_TIMEOUT = int(_get("LLM_TIMEOUT", "120"))
-LLM_MAX_RETRIES = int(_get("LLM_MAX_RETRIES", "2"))
-
 # ── FAB 목록 / 별칭  [원본·추정] ──────────────────────────────────────────
 # fab_extract_tool 은 DB 를 보지 않고 이 표만 대조해서 FAB 을 정규화한다.
 # 사용자가 별칭으로 불러도 인식해야 하므로 암묵지 별칭을 함께 둔다.

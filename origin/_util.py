@@ -11,36 +11,74 @@ import re
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from origin import _state
 
-async def agent_node(state, agent, name: str):
-    """react agent 를 실행하고 결과를 AgentState 조각으로 돌려준다.  [원본·추정]
 
-    호출 형태만 확인됐다 — `await _util.agent_node(state, agent, "ExtractAgent")`.
-    본문은 받지 못했으므로 아래는 추정이다. **사내 실물로 덮어쓸 것.**
+async def agent_node(state: _state.AgentState, agent, name: str, *,
+                     next_value=None) -> _state.AgentState:
+    """react agent 를 실행하고, 이번 호출로 새로 늘어난 메시지만 골라 돌려준다.
 
     Args:
-        state : 현재 그래프 상태
-        agent : create_react_agent 로 만든 실행기
-        name  : 에이전트 이름. 결과 AIMessage 의 name 으로 박힌다.
+        state      : 현재 그래프 상태
+        agent      : create_react_agent 로 만든 실행기
+        name       : 에이전트 이름. 새 AIMessage 의
+                     additional_kwargs["agent_name"] 에 박힌다.
+        next_value : 주면 patch 에 next 로 실어 보낸다 (키워드 전용)
 
-    결과에 name 을 박아 두는 게 중요하다. Supervisor 가 "이번 턴에 누가
-    답했는지" 를 이 name 으로 판정하기 때문이다.
+    실패해도 그래프를 죽이지 않는다 — 에러도 사용자에게 보여줄 메시지로 바꿔
+    돌려주고, 다음 노드가 평소대로 이어받는다.
     """
     print(f"[NODE] {name} entered", flush=True)
 
-    # react agent 는 {"messages": [...]} 를 받아 같은 모양으로 돌려준다.
-    result = await agent.ainvoke({"messages": state.get("messages", []) or []})
+    before = list(state.get("messages", []) or [])
 
-    # 마지막 메시지가 그 에이전트의 최종 답변이다.
-    last = result["messages"][-1]
-    content = getattr(last, "content", "") or ""
+    try:
+        out = await agent.ainvoke({"messages": before})
 
-    print(f"[NODE] {name} done ({len(str(content))}자)", flush=True)
+    except Exception as e:
+        print(f"[ERROR] {name} 실행 실패: {type(e).__name__}: {e}", flush=True)
+        error_msg = AIMessage(
+            content=f"{name} 처리 중 오류가 발생했습니다. 다시 시도해주세요.",
+            additional_kwargs={"agent_name": name},
+        )
+        patch: _state.AgentState = {
+            "messages": [error_msg],
+            "step": state.get("step", 0) + 1,
+        }
+        if next_value is not None:
+            patch["next"] = next_value
+        return patch
 
-    return {
-        "messages": [AIMessage(content=content, name=name)],
+    # react agent 는 받은 messages 뒤에 자기 작업 내역을 이어 붙여 돌려준다.
+    # 그래서 늘어난 뒷부분만 잘라내야 같은 메시지를 두 번 싣지 않는다.
+    after = list(out.get("messages", []) or [])
+    append = after[len(before):] if len(after) >= len(before) else after
+
+    if not append:
+        print(f"[WARN] {name} 이(가) 새 메시지를 만들지 않았습니다", flush=True)
+        empty_msg = AIMessage(
+            content=f"{name}에서 유효한 응답을 생성하지 못했습니다.",
+            additional_kwargs={"agent_name": name},
+        )
+        append = [empty_msg]
+
+    # 누가 만든 메시지인지 표시해 둔다. Supervisor 가 이 값을 읽는다.
+    for msg in append:
+        if isinstance(msg, AIMessage):
+            msg.additional_kwargs["agent_name"] = name
+
+            content = msg.content or ""
+            if "STATUS:" in content:
+                header_line = content.strip().split("\n")[0]
+                print(f"[NODE] {name} {header_line}", flush=True)
+
+    patch: _state.AgentState = {
+        "messages": append,
         "step": state.get("step", 0) + 1,
     }
+    if next_value is not None:
+        patch["next"] = next_value
+    return patch
 
 
 # ─────────────────────────────────────────────────────────────────────────
