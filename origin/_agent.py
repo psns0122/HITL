@@ -21,7 +21,6 @@ from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field
 
 from origin import _llm, _prompt, _state, _tool, _util
-from app.actions.registry import ACTION_REGISTRY
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -223,4 +222,13 @@ def create_extract_agent(model_name: str = None):
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────
+def create_action_agent(model_name: str = None):
+    """명령 실행 (반송요청명령 / 목적지요청)."""
+    return create_react_agent(
+        model=_llm.get_llm(model_name, temperature=0.2),
+        tools=disable_tool_caching([
+            _tool.transport_tool,
+            _tool.dest_req_tool,
+        ]),
+        prompt=_prompt.action_agent_prompt().strip(),
+    )
