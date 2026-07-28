@@ -43,7 +43,7 @@ async def get_team_graph(model_name: str = None):
             return entry["graph"], entry["checkpointer"]
 
         print(f"[GRAPH] 빌드 (model={cache_key})", flush=True)
-        graph, checkpointer = build_team_graph(model_name=model_name)
+        graph, checkpointer = build_team_graph()
 
         _dynamic_graph_cache[cache_key] = {
             "graph": graph,
