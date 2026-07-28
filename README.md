@@ -357,6 +357,23 @@ Streamlit 이 이를 `st.status` 에 흘려서 "Supervisor 판단 중… / Locat
 
 ## 모듈 구조
 
+저장소에는 패키지가 둘 있습니다.
+
+| 패키지 | 무엇인가 | 실행되나 |
+|---|---|---|
+| `app/` | 원본 + HITL ActionAgent | ✅ 실제로 도는 코드 |
+| `origin/` | **HITL 이전의 사내 원본 코드** | ❌ 비교 기준선. 아무도 import 하지 않음 |
+
+`origin/` 은 "원래 무엇이었는지" 를 diff 로 보기 위한 스냅샷입니다.
+파일마다 근거(직접 제공 / 첨부 / 사내 규약 / 추정)를 태그로 달아 뒀으니
+`origin/README.md` 를 먼저 보세요.
+
+```bash
+diff -u origin/_node.py    app/_node.py       # Supervisor 가 어떻게 달라졌는지
+diff -u origin/_builder.py app/_builder.py    # 배선 차이 (체크포인터 / END 분기)
+diff -u origin/_state.py   app/_state.py      # action / facts 필드 추가
+```
+
 ```
 app/
 ├── config.py            # .env 로드
@@ -381,6 +398,16 @@ app/
     ├── usage_store.py   # thread_id 별 토큰/시간 원장
     ├── graph_service.py # 모델명 키 그래프 캐시
     └── schemas.py       # ChatRequest / ChatResponse / StopRequest
+
+origin/                  # ← HITL 이전 사내 원본 (비교 전용, 실행 안 함)
+├── README.md            #   출처 표기: 직접 제공 / 첨부 / 사내 규약 / 추정
+├── config.py  _state.py  _llm.py  _prompt.py  _tool.py
+├── _agent.py            #   create_*_agent — 전부 같은 3줄 구조
+├── _node.py             #   워커 노드 = try/agent_node/except 한 틀
+├── _util.py             #   agent_node (모든 워커가 위임하는 헬퍼)
+├── _builder.py          #   체크포인터 없음, Supervisor 분기표에 END 없음
+├── main.py
+└── api/                 #   routes.py(save_formatted_log 원문) / schemas / graph_service
 ```
 
 ### 에이전트별 툴
