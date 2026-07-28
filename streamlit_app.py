@@ -362,7 +362,9 @@ def send(query: str):
         # 실행이 끝나면 카드를 접는다 — 답변이 화면에 바로 보이게.
         # (실행 중에는 펼쳐져 있고, 끝난 뒤엔 라벨 클릭으로 다시 펼 수 있다)
         if needs:
-            status.update(label="사용자 입력 대기 ⏸", state="complete", expanded=False)
+            asker = needs.get("agent") or "에이전트"
+            status.update(label=f"사용자 입력 대기 ⏸ · {asker}",
+                          state="complete", expanded=False)
             answer = needs.get("prompt", "추가 입력이 필요합니다.")
             answer_box.markdown(answer)
         else:

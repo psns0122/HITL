@@ -198,7 +198,7 @@ data: {"type": "needs_input", "kind": "confirm", "prompt": "...", ...}
 |---|---|---|
 | `token` | `{text}` | 최종 답변 토큰 |
 | `trace` | `{agent, tool, args, result}` | 트레이스. `tool=null` 은 노드 진입, 아니면 툴 실행(입력/결과가 두 프레임) |
-| `needs_input` | `{kind: collect_param\|confirm, prompt, field}` | **HITL 대기 (턴 종료)** |
+| `needs_input` | `{kind: collect_param\|confirm, agent, prompt, field}` | **HITL 대기 (턴 종료)** |
 | `usage` | 토큰/시간 집계 | 턴 종료 직전 1회 |
 | `done` | `{reason: complete\|interrupted\|stopped\|error, message}` | 항상 마지막 프레임. 오류 사유는 `message` |
 

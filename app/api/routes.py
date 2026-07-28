@@ -393,6 +393,7 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
         yield _event({
             "type": "needs_input",
             "kind": payload.get("type"),          # collect_param | confirm
+            "agent": payload.get("agent"),        # 질문 주체 (예: ActionAgent)
             "prompt": payload.get("prompt"),
             "field": payload.get("field"),        # confirm 이면 null
         })

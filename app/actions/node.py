@@ -97,6 +97,7 @@ def _ask_param(sc: dict) -> dict:
 
     sc["awaiting"] = {
         "type": "collect_param",
+        "agent": "ActionAgent",          # 질문 주체 — needs_input 프레임에 실린다
         "action": sc.get("action"),
         "field": fieldname,
         "prompt": prompt,
@@ -121,6 +122,7 @@ def _ask_confirm(sc: dict) -> dict:
 
     sc["awaiting"] = {
         "type": "confirm",
+        "agent": "ActionAgent",          # 질문 주체 — needs_input 프레임에 실린다
         "action": sc["action"],
         "prompt": guidance,
         "params": sc["params"],

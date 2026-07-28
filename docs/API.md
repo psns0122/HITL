@@ -58,7 +58,7 @@
 |---|---|---|
 | `token` | `text` | 최종 답변 생성 중. text 를 이어붙이면 답변 전문 |
 | `trace` | `agent`, `tool`, `args`, `result` | 실행 트레이스. `tool=null` 이면 노드 진입, 아니면 툴 실행 |
-| `needs_input` | `kind`, `prompt`, `field` | **HITL — 사용자 입력 필요.** 턴 끝에 옴 |
+| `needs_input` | `kind`, `agent`, `prompt`, `field` | **HITL — 사용자 입력 필요.** 턴 끝에 옴 |
 | `usage` | `total_tokens`, `per_agent`, `ttft_ms`, `elapsed_ms`, `compute_ms`, `human_wait_ms`, `hitl_rounds`, `stream_calls` … | 턴 종료 직전 1회. 표시 안 해도 됨 |
 | `done` | `reason`, `message` | **항상 마지막 프레임** |
 
@@ -98,10 +98,10 @@ data: {"type":"trace", "agent":"ActionAgent", "tool":"param_check_tool", "args":
 
 ```
 event: needs_input
-data: {"type":"needs_input", "kind":"collect_param", "prompt":"목적지 장비 ID를 알려주세요. (예: STK102)", "field":"eqp_id"}
+data: {"type":"needs_input", "kind":"collect_param", "agent":"ActionAgent", "prompt":"목적지 장비 ID를 알려주세요. (예: STK102)", "field":"eqp_id"}
 
 event: needs_input
-data: {"type":"needs_input", "kind":"confirm", "prompt":"⚠️ 반송요청명령 실행 확인\n- 캐리어: 6PDMQ283 (현재 위치 STK101)\n- 목적지: STK102\n이 명령을 정말 실행할까요? (승인/거절)", "field":null}
+data: {"type":"needs_input", "kind":"confirm", "agent":"ActionAgent", "prompt":"⚠️ 반송요청명령 실행 확인\n- 캐리어: 6PDMQ283 (현재 위치 STK101)\n- 목적지: STK102\n이 명령을 정말 실행할까요? (승인/거절)", "field":null}
 ```
 
 | kind | 뜻 | 권장 UI |
@@ -109,6 +109,7 @@ data: {"type":"needs_input", "kind":"confirm", "prompt":"⚠️ 반송요청명�
 | `collect_param` | 파라미터 값 질문. `field` = 묻는 파라미터 이름 | `prompt` 를 봇 말풍선으로, 입력창 placeholder 를 `field` 기준으로. 자유 입력 허용 ("9ZXCV456 있는 위치로" 같은 간접 답도 서버가 해석) |
 | `confirm` | 실행 최종 승인. `field` = null | `prompt` 를 봇 말풍선으로 + [승인] [거절] 버튼. 버튼도 결국 `query="승인"` 전송일 뿐 |
 
+`agent` 는 질문 주체입니다(현재는 항상 `ActionAgent`) — "누가 물었는지" 라벨용.
 확정된 파라미터 값들은 `prompt` 문구 안에 이미 들어 있습니다 — 별도 필드 없음.
 취소는 언제든 자유 입력("취소", "그만")으로 가능 — 서버가 판정합니다.
 
