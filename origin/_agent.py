@@ -49,8 +49,8 @@ def create_status_agent(model_name: str = None):
         model=_llm.get_llm(model_name=model_name, temperature=0),
         tools=disable_tool_caching([
             _tool.queue_status_tool,
-            _tool.server_status_tool,
-            _tool.sysadmin_tool,
+            _tool.server_status_search_tool,
+            _tool.sys_admin_tool,
             _tool.patch_plan_search_tool,
             _tool.eqp_search_tool,
         ]),

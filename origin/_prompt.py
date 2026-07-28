@@ -1,7 +1,7 @@
-"""에이전트 프롬프트 모음.  [원본·추정]
+"""프롬프트 / 툴 설명 모음.  [원본·추정]
 
 문구 원문은 받지 못했다. **사내 실물로 덮어써 주세요.**
-확실한 것은 호출 규약 두 가지뿐이고, 그건 지켰다.
+확실한 것은 호출 규약 셋뿐이고, 그건 지켰다.
 
   1. 각 함수는 인자 없이 문자열 하나만 돌려준다.
      (직접 제공된 코드가 `_prompt.extract_agent_prompt()` 처럼 부른다)
@@ -9,6 +9,10 @@
      로스터/옵션은 _node.py 의 ChatPromptTemplate 이 .partial 로 넣는다.
      -> 이 본문에 `{members}` 같은 중괄호 변수를 쓰면 안 된다.
         _node.py 가 본문의 중괄호를 전부 이스케이프하기 때문에 치환되지 않는다.
+  3. **툴 설명도 여기 있다.** `*_tool_description()` 이 그것이다.
+     툴의 docstring 이 아니라 이 함수가 LLM 에게 가는 설명이다
+     (`@tool("이름", description=_prompt.이름_description())`).
+     -> 툴이 언제 불릴지를 조정하려면 툴 코드가 아니라 이 파일을 고친다.
 """
 
 
@@ -138,3 +142,113 @@ def final_general_agent_prompt() -> str:
 - 사내 데이터가 필요한 질문이면 무엇을 조회할 수 있는지 안내하세요.
 - 확인되지 않은 사실을 단정하지 마세요.
 """.strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 툴 설명
+#   LLM 이 "언제 이 툴을 부를지" 판단하는 근거가 이 문자열이다.
+#   툴의 docstring 은 사람용이고, LLM 은 여기만 본다.
+# ─────────────────────────────────────────────────────────────────────────
+
+# --- GeneralAgent -------------------------------------------------------
+
+def general_tool_description() -> str:
+    return (
+        "일반 지식, 범용 개념, 일반 프로그래밍/통계/수학 질문에 답한다. "
+        "사내 데이터(캐리어/장비/반송/로그)가 필요 없는 질문에만 쓴다."
+    )
+
+
+def amhs_rag_tool_description() -> str:
+    return (
+        "AMHS 내부 문서를 검색해 근거와 함께 답한다. "
+        "운영 규칙·절차·용어처럼 문서에 적혀 있을 내용을 물을 때 쓴다."
+    )
+
+
+# --- StatusAgent --------------------------------------------------------
+
+def queue_status_tool_description() -> str:
+    return (
+        "특정 공장(fabs)의 반송현황을 조회한다. 기간을 좁히려면 from_dt/to_dt 를 준다. "
+        "'반송이 밀렸나', '큐 적체' 같은 질문에 쓴다."
+    )
+
+
+def server_status_search_tool_description() -> str:
+    return (
+        "특정 공장(fabs)의 서버 CPU 점유율 등 상태를 조회한다. "
+        "시점을 지정하려면 target_dt 를 준다."
+    )
+
+
+def sys_admin_tool_description() -> str:
+    return (
+        "공장(fabs)·시스템(systems)별 담당자를 조회한다. "
+        "'누구한테 연락해야 하나' 류 질문에 쓴다."
+    )
+
+
+def patch_plan_search_tool_description() -> str:
+    return (
+        "공장(fabs)·시스템(systems)별 패치 계획을 조회한다. "
+        "'언제 점검이냐', '패치 예정 있냐' 류 질문에 쓴다."
+    )
+
+
+def eqp_search_tool_description() -> str:
+    return (
+        "장비(machine_name)가 등록되어 있는지와 현재 상태를 조회한다. "
+        "장비 이름이 특정된 뒤에 쓴다."
+    )
+
+
+# --- LocationAgent ------------------------------------------------------
+
+def location_search_tool_description() -> str:
+    return (
+        "id(identifier)의 현재 위치를 조회한다. 캐리어인지 랏인지 미리 정하지 않아도 된다. "
+        "'어디 있냐' 류 질문에 쓴다."
+    )
+
+
+# --- LogAgent -----------------------------------------------------------
+
+def log_search_tool_description() -> str:
+    return (
+        "캐리어(carrier_id)의 로그 데이터를 조회한다. 기간을 좁히려면 time_inputs 를 준다. "
+        "'왜 실패했냐', '이력 보여줘', '원인이 뭐냐' 류 질문에 쓴다."
+    )
+
+
+# --- ExtractAgent -------------------------------------------------------
+
+def fab_extract_tool_description() -> str:
+    return (
+        "사용자 발화에서 FAB 을 찾아 유효한 FAB 명으로 정규화한다. "
+        "별칭으로 불러도 인식한다. DB 를 보지 않는다."
+    )
+
+
+def params_extract_tool_description() -> str:
+    return (
+        "발화 속 정체불명의 ID 가 실제로 무엇인지(캐리어/랏/장비/유닛/포트/존) "
+        "DB 로 판정한다. 어디에도 없으면 unknown 으로 답한다. "
+        "ID 가 무엇인지 확정해야 하는 모든 경우에 쓴다."
+    )
+
+
+# --- ActionAgent  [원본·추정] -------------------------------------------
+
+def transport_tool_description() -> str:
+    return (
+        "반송요청명령을 실행한다. carrier_id 와 목적지 eqp_id 가 모두 확정된 뒤에만 부른다. "
+        "값을 추측해서 채우지 말 것."
+    )
+
+
+def dest_req_tool_description() -> str:
+    return (
+        "목적지요청을 실행한다. carrier_id 가 확정된 뒤에만 부른다. "
+        "목적지는 시스템이 정한다."
+    )

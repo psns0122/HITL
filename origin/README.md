@@ -25,13 +25,58 @@ diff -u origin/_builder.py app/_builder.py
 
 | 태그 | 뜻 | 해당 파일 |
 |---|---|---|
-| `[원본·직접]` | 사용자가 직접 타이핑해 준 코드. 구조·변수명 그대로. | `_agent.py`, `_node.py` 의 `extract_node` / `supervisor_node` |
+| `[원본·직접]` | 사용자가 직접 타이핑해 준 코드. 구조·변수명 그대로. | `_agent.py`, `_node.py` 의 `extract_node` / `supervisor_node`, `_tool.py` 의 시그니처 |
 | `[원본·첨부]` | 공유해 준 `shared_code.md` 기준 재구성. | `_state.py`, `_util.py`, `_builder.py`, `api/routes.py` |
 | `[원본·규약]` | 사내 다른 프로젝트(`pptx-vision-rag`)의 실제 규약에서 가져옴. | `config.py`, `_llm.py` |
-| `[원본·추정]` | 위 셋 어디에도 원문이 없어 같은 패턴으로 채운 부분. **사내 실물과 대조 필요.** | `_prompt.py`, `_tool.py`, `api/schemas.py`, `api/graph_service.py`, `main.py` |
+| `[원본·추정]` | 위 셋 어디에도 원문이 없어 같은 패턴으로 채운 부분. **사내 실물과 대조 필요.** | `_prompt.py`, `api/schemas.py`, `api/graph_service.py`, `main.py`, `_util.safe_tool`, `_tool.py` 의 ActionAgent 툴 2종, `config.VALID_FABS` |
 
 `[원본·추정]` 파일은 사내에서 실물을 보고 덮어써 주세요.
 그래야 이 패키지가 진짜 기준선이 됩니다.
+
+---
+
+## 툴 계약 (`_tool.py`)
+
+시그니처는 직접 제공받은 것이고, **본문만** 비어 있습니다
+(`NotImplementedError`). 예외 없는 규약이 넷 있습니다.
+
+```python
+@tool("이름", description=_prompt.이름_description())   # ← 설명은 _prompt.py 에서
+@safe_tool                                              # ← 예외를 에러 dict 로
+def 이름(..., config: RunnableConfig = {}) -> Dict[str, Any]:
+    """사람이 읽는 설명 (LLM 은 이걸 안 본다)"""
+```
+
+1. **툴 설명은 docstring 이 아니라 `_prompt.py` 의 `*_description()`** 에서 온다.
+   → 툴이 언제 불릴지를 조정할 때 툴 코드를 건드리지 않는다.
+2. 마지막 인자는 항상 `config: RunnableConfig = {}`.
+   LangChain 이 자동 주입하므로 LLM 이 보는 인자 목록에는 안 들어간다.
+3. 반환은 항상 `Dict[str, Any]`. 문자열이 아니다 —
+   에이전트 프롬프트가 이 dict 를 해석해 리포트로 다듬는다.
+4. **MCP 서버 툴을 직접 부르는 것만 `async`**:
+   `eqp_search_tool`, `location_search_tool`, `params_extract_tool`.
+
+내가 처음에 추측했던 이름/시그니처와 실제가 다른 것들:
+
+| 내 추측 | 실제 |
+|---|---|
+| `server_status_tool(server)` | `server_status_search_tool(fabs, target_dt, user_query)` |
+| `sysadmin_tool(command)` | `sys_admin_tool(fabs, systems, user_query)` |
+| `location_search_tool(carrier_id)` | `location_search_tool(identifier)` — 캐리어인지 랏인지 부르는 쪽이 확정하지 않는다 |
+| `eqp_search_tool(eqp_id)` | `eqp_search_tool(machine_name, fab)` |
+| `fab_extract_tool(text)` | `fab_extract_tool(user_query)` |
+| 반환 `str` | 반환 `Dict[str, Any]` |
+| `fab` 은 부수적 | **StatusAgent 툴 전부가 `fabs` 를 첫 인자로** 받는다 — 조회 범위를 공장 단위로 자르는 구조 |
+
+### ⚠ `params_extract_tool` = 이미 존재하는 ID 판독기
+
+`app/id_reader.py` 는 "정체불명 ID 를 DB 로 판정" 하려고 새로 만든 것인데,
+`params_extract_tool` 이 **이미 정확히 그 일을 한다** (캐리어/랏/장비/유닛/
+포트/존 중 무엇인지, 아니면 unknown 인지를 DB 로 판정).
+
+→ 사내 반입 시 `id_reader.py` 는 **가져가지 말고**, ActionAgent 가
+`params_extract_tool` 을 부르게 바꾸는 게 맞습니다. 자세한 건
+`docs/PORTING.md` 참고.
 
 ---
 

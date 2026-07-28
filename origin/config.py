@@ -38,6 +38,18 @@ LLM_MAX_TOKENS = int(_get("LLM_MAX_TOKENS", "4000"))
 LLM_TIMEOUT = int(_get("LLM_TIMEOUT", "120"))
 LLM_MAX_RETRIES = int(_get("LLM_MAX_RETRIES", "2"))
 
+# ── FAB 목록 / 별칭  [원본·추정] ──────────────────────────────────────────
+# fab_extract_tool 은 DB 를 보지 않고 이 표만 대조해서 FAB 을 정규화한다.
+# 사용자가 별칭으로 불러도 인식해야 하므로 암묵지 별칭을 함께 둔다.
+# **실제 목록은 사내 config.py 에서 가져와 덮어쓸 것.**
+VALID_FABS = ["M16", "M14", "M11"]
+
+FAB_ALIASES = {
+    # "별칭": "정규 FAB명"
+    "엠십육": "M16",
+    "16라인": "M16",
+}
+
 # ── 로그: {LOG_DIR}/{YYYY-MM}/{YYYY-MM-DD}.jsonl ──────────────────────────
 LOG_DIR = _get("LOG_DIR", "./devLogs")
 
