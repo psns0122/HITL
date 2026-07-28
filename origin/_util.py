@@ -1,12 +1,17 @@
 """공용 헬퍼.  [원본·직접]
 
-  agent_node          : create_react_agent 계열 워커 노드 전부가 여기 위임한다
-  slice_new_messages  : 이번 호출로 새로 늘어난 메시지만 잘라낸다
-  message_to_dict     : 메시지를 로그/직렬화용 dict 로 편다
+  agent_node             : create_react_agent 계열 워커 노드 전부가 여기 위임한다
+  slice_new_messages     : 이번 호출로 새로 늘어난 메시지만 잘라낸다
+  message_to_dict        : 메시지를 로그/직렬화용 dict 로 편다
+  last_user_text         : 마지막 사용자 발화 텍스트
+  extract_json_object    : 응답 문자열에서 JSON 객체 하나 꺼내기
+  message_content_to_text: LLM content 를 문자열로 정규화
 """
-from typing import Any, Dict, List, Sequence
+import json
+import re
+from typing import Any, Dict, List, Optional, Sequence
 
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from origin import _state
 
@@ -109,3 +114,82 @@ def message_to_dict(m: BaseMessage) -> Dict[str, Any]:
         d["tool_calls"] = getattr(m, "tool_calls", None)
 
     return d
+
+
+def last_user_text(state: Any) -> str:
+    """마지막 사용자 발화 텍스트.
+
+    state(dict) / messages(list) / 객체 어느 형태로 들어와도 받는다.
+    HumanMessage 가 하나도 없으면 마지막 메시지 내용으로 대신한다.
+    """
+    if isinstance(state, dict):
+        msgs = state.get("messages", []) or []
+    elif isinstance(state, list):
+        msgs = state
+    else:
+        msgs = getattr(state, "messages", []) or []
+
+    for msg in reversed(msgs):
+        if isinstance(msg, HumanMessage):
+            return message_content_to_text(msg.content)
+
+    if msgs:
+        return message_content_to_text(getattr(msgs[-1], "content", ""))
+
+    return ""
+
+
+def extract_json_object(text: str) -> Optional[dict]:
+    """응답 문자열에서 JSON 객체 하나를 꺼낸다. 못 꺼내면 None.
+
+    통째로 파싱해 보고, 실패하면 첫 '{' ~ 마지막 '}' 구간만 다시 시도한다.
+    """
+    text = (text or "").strip()
+
+    if not text:
+        return None
+
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not match:
+        return None
+
+    try:
+        return json.loads(match.group(0))
+    except Exception:
+        return None
+
+
+def message_content_to_text(content: Any) -> str:
+    """LLM 응답의 content 를 문자열로 정규화한다.
+
+    content 는 모델/버전에 따라 문자열, 블록 리스트, 그 외로 온다.
+    """
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if "text" in item:
+                    parts.append(str(item["text"]))
+                elif "content" in item:
+                    parts.append(str(item["content"]))
+                else:
+                    parts.append(str(item))
+            else:
+                parts.append(str(item))
+
+        return "\n".join(parts).strip()
+
+    return str(content).strip()
