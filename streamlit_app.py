@@ -194,7 +194,10 @@ st.caption("Router → Supervisor → ExtractAgent → 워커 → FinalAnswerAge
 def render_trace(trace: list, expanded: bool = True):
     """노드/툴 실행 트레이스를 접이식으로. 기본은 펼침 — 접는 건 사용자 선택.
 
-    진입점(node_enter)만 아이콘을 붙이고, 나머지(툴·상태)는 `- ...` 로 통일한다(항목 9).
+    카드에는 두 가지만 담는다.
+      ▶ 노드   : 어느 노드에 들어갔는지
+      - 툴    : 무엇을 어떤 입력으로 실행해 어떤 결과가 나왔는지
+    에이전트의 중간 응답/상태 문구는 싣지 않는다 — 시끄럽기만 하다.
     """
     if not trace:
         return
@@ -254,8 +257,16 @@ for turn in st.session_state.history:
 # 전송 처리
 # ─────────────────────────────────────────────────────────────────────────
 
-# 진입점만 아이콘. 툴/상태는 아이콘 없이 `- ...` 로 통일 (항목 9)
+# 진입점만 아이콘. 툴은 아이콘 없이 `- ...` 로 통일 (항목 9)
 NODE_ICON = "▶"
+
+
+def _fmt_val(v, limit: int = 300) -> str:
+    """툴 입력/결과를 카드 한 줄에 들어가게 다듬는다 (개행 제거 + 길이 제한)."""
+    text = " ".join(str(v).split())
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
 
 
 def send(query: str):
@@ -271,7 +282,12 @@ def send(query: str):
 
     with st.chat_message("assistant"):
         status = st.status("에이전트 실행 중…", expanded=True)
+        trace_box = status.empty()      # 트레이스는 통째로 다시 그린다 (병합 반영)
         answer_box = st.empty()
+
+        def redraw_trace():
+            if trace:
+                trace_box.markdown("\n\n".join(trace))
 
         try:
             for kind, item in stream_chat(query, model_name, int(recursion_limit)):
@@ -286,33 +302,33 @@ def send(query: str):
                 ev = item
                 t = ev.get("type")
 
+                # 카드에 담는 건 node_enter / tool_call 뿐이다.
+                # agent_status(상태 문구)와 thinking(중간 응답 토큰)은 버린다.
                 if t == "node_enter":
-                    # 진입점만 아이콘
-                    line = f"{NODE_ICON} **{ev['agent']}**"
-                    trace.append(line)
-                    status.write(line)
+                    trace.append(f"{NODE_ICON} **{ev['agent']}**")
+                    redraw_trace()
                     status.update(label=f"{ev['agent']} 실행 중…", expanded=True)
 
                 elif t == "tool_call":
-                    # 툴은 아이콘 없이 `- tool(입력) → 결과` 형태로. 입력과 결과를 항상 보여준다(항목 10).
+                    # 툴 하나 = 한 줄: `- tool 입력: … → 결과: …`
+                    # ReAct 툴은 입력(on_tool_start)과 결과(on_tool_end)가 두 이벤트로
+                    # 나뉘어 오므로, 결과만 온 이벤트는 직전 같은 툴 줄에 이어 붙인다.
                     tool = ev.get("tool")
                     args = ev.get("args")
                     result = ev.get("result")
-                    detail = f"- `{tool}`"
-                    if args is not None:
-                        detail += f" 입력: `{args}`"
-                    if result is not None:
-                        detail += f" → 결과: `{result}`"
-                    trace.append(detail)
-                    status.write(detail)
 
-                elif t == "agent_status":
-                    line = f"- {ev.get('agent')}: {ev.get('detail')}"
-                    trace.append(line)
-                    status.write(line)
-
-                elif t == "thinking":
-                    status.write(f"- {ev.get('agent')}: {ev.get('text')}")
+                    if (result is not None and args is None and trace
+                            and trace[-1].startswith(f"- `{tool}`")
+                            and "→ 결과:" not in trace[-1]):
+                        trace[-1] += f" → 결과: `{_fmt_val(result)}`"
+                    else:
+                        line = f"- `{tool}`"
+                        if args is not None:
+                            line += f" 입력: `{_fmt_val(args)}`"
+                        if result is not None:
+                            line += f" → 결과: `{_fmt_val(result)}`"
+                        trace.append(line)
+                    redraw_trace()
 
                 elif t == "needs_input":
                     needs = ev
