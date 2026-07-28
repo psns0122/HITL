@@ -1,6 +1,6 @@
 """HITL 시나리오 E2E 테스트 — 그래프를 직접 invoke 한다.
 
-사내 LLM 게이트웨이가 붙어 있어야 돈다 (목업 LLM 은 없다).
+사내 LLM 게이트웨이가 붙어 있어야 돈다.
 
 턴 기반 HITL: 모든 사용자 입력(최초 질문·HITL 답변)이 똑같이 새 턴으로
 들어가 Router → Supervisor 를 경유한다. interrupt/resume 은 쓰지 않는다.

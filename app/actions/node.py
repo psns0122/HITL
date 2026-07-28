@@ -212,7 +212,7 @@ def _consume_param_answer(sc: dict, answer, config, model_name=None, question=No
 
     분기: 취소 / 맥락이탈(재시작) / 상담 / 액션선택 / 값 / 재질문
     ★ 판단은 노드가 하지 않는다 — action_agent(LLM)가 분류하고,
-      노드는 그 결과에 따라 흐름만 잡는다. (규칙은 FAKE 모드/폴백 전용)
+      노드는 그 결과에 따라 흐름만 잡는다.
     """
     fieldname = sc.get("pending_field")
     print(f"[ACTION merge_param] enter field={fieldname}", flush=True)

@@ -3,8 +3,7 @@
 프론트에서 모델을 골라 보내면 그 모델로 그래프를 돌린다.
 model_name 이 None 이면 .env 의 기본 모델(LLM_CHAT_MODEL)을 쓴다.
 
-사내 OpenAI 호환 게이트웨이(ChatOpenAI)로만 붙는다. 목업 모델은 없다 —
-모든 판단은 실제 LLM 이 한다.
+사내 OpenAI 호환 게이트웨이(ChatOpenAI)로 붙는다.
 """
 import app.config as cfg
 

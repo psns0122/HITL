@@ -1,8 +1,8 @@
 """테스트 선행 점검 — 사내 LLM 게이트웨이가 붙어 있는지 확인한다.
 
-목업 LLM 은 없다. 이 프로젝트의 모든 판단(라우팅·의도 추출·답변 분류·
-승인 판정)은 실제 모델이 하므로, 시나리오 테스트도 게이트웨이가 있어야
-돌아간다. 사내망 밖에서 돌리면 여기서 이유를 알려주고 멈춘다.
+이 프로젝트의 모든 판단(라우팅·의도 추출·답변 분류·승인 판정)은 실제
+모델이 하므로, 시나리오 테스트도 게이트웨이가 있어야 돌아간다.
+사내망 밖에서 돌리면 여기서 이유를 알려주고 멈춘다.
 """
 import sys
 
@@ -25,7 +25,7 @@ def require_gateway():
     except Exception as e:
         print("\n[preflight] 게이트웨이에 붙지 못했습니다.", flush=True)
         print(f"           사유: {type(e).__name__}: {e}", flush=True)
-        print("\n이 테스트들은 실제 LLM 이 있어야 돕니다 (목업 LLM 은 없습니다).", flush=True)
+        print("\n이 테스트들은 실제 LLM 이 있어야 돕니다.", flush=True)
         print(".env 의 LLM_GATEWAY_BASE_URL / LLM_GATEWAY_API_KEY 를 확인하고,", flush=True)
         print("사내망에서 다시 실행해 주세요.", flush=True)
         sys.exit(1)

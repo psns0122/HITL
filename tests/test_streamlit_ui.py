@@ -1,6 +1,6 @@
 """Streamlit UI E2E 테스트 — 실제 위젯을 조작해 HITL 왕복을 확인한다.
 
-사내 LLM 게이트웨이가 붙어 있어야 돈다 (목업 LLM 은 없다).
+사내 LLM 게이트웨이가 붙어 있어야 돈다.
 
 AppTest 가 streamlit_app.py 를 그대로 실행하고, 그 UI 가 백그라운드로 띄운
 실제 uvicorn 서버에 SSE 로 붙는다. 즉 UI → HTTP → 그래프 → HITL → UI 전 구간을 탄다.
