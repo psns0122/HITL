@@ -125,7 +125,7 @@ def build_general_agent():
         # 일반 대화로 확정 -> 여기서 답변을 만든다
         llm = _llm.get_llm(model_name, temperature=0.0)
         chain = prompt | llm
-        resp = await chain.ainvoke({"messages": messages})
+        resp = chain.invoke({"messages": messages})
 
         print("[AGENT] general -> FINISH (일반 대화 확정)", flush=True)
         return {
