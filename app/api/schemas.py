@@ -11,8 +11,9 @@ class ChatRequest(BaseModel):
     )
 
     thread_id: str = Field(
-        ...,
-        description="채팅 세션 식별자. 세션당 하나를 계속 유지해야 대화 맥락이 이어진다.",
+        "local_test",
+        description="채팅 세션 식별자. 세션당 하나를 계속 유지해야 대화 맥락이 이어진다. "
+                    "기본값은 로컬 테스트용이라 실제 프론트는 항상 보낸다.",
     )
 
     model_name: str | None = Field(
@@ -29,13 +30,16 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    """비스트리밍 응답 / 스트림 종료 후 최종 결과."""
+    """최종 응답. 사내 원본과 동일하게 두 필드만 관리한다.
+
+    route / step_history 같은 실행 내역은 응답으로 내보내지 않는다.
+    프론트가 쓰지 않는 값을 응답에 실으면 계약만 넓어진다 — 그건 일별
+    jsonl 로그에만 남는다.
+    HITL 대기 여부도 여기가 아니라 스트림의 needs_input 제어 프레임으로 간다.
+    """
 
     text: str = Field("", description="최종 답변 전문")
     thread_id: str = Field("", description="이 응답이 속한 세션")
-    route: str | None = Field(None, description="general | supervisor")
-    step_history: list = Field(default_factory=list, description="실행된 노드 순서")
-    interrupted: bool = Field(False, description="HITL 로 멈춰서 추가 입력을 기다리는 중인지")
 
 
 class StopRequest(BaseModel):

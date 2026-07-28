@@ -1,36 +1,45 @@
 """팀 그래프 빌더.  [원본·첨부]
 
-배선은 단순하다.
-
+흐름 요약
     START -> Router
       Router -> GeneralAgent    (일반 질의)
       Router -> Supervisor      (업무 질의)
 
       GeneralAgent -> FINISH     -> FinalGeneralAgent -> END
-      GeneralAgent -> Supervisor (handoff)
+      GeneralAgent -> Supervisor (handoff: 업무 질의로 재판정된 경우)
 
-      Supervisor -> 워커 -> 다시 Supervisor
+      Supervisor -> 워커 노드 -> 다시 Supervisor
       Supervisor -> FINISH       -> FinalAnswerAgent -> END
 
 워커는 실행 후 항상 Supervisor 로 돌아온다.
+그래서 사용자 질의가 들어오면 언제나 Supervisor 부터 다시 판단하게 된다.
 
-app/_builder.py 와의 차이
-  1. 체크포인터를 여기서 만든다 — app 쪽은 모델별로 그래프를 여러 벌 빌드하므로
-     체크포인터를 모듈 상수로 빼서 **모든 그래프가 하나를 공유**하게 했다.
-     (안 그러면 승인 대기 중에 모델을 바꾸는 순간 그 스레드가 미아가 된다)
-  2. Supervisor 분기표에 END 가 없다 — 턴이 질문으로 끝나는 경우가 없다.
+app/_builder.py 와의 차이는 둘뿐이다.
+  1. build_team_graph 가 **매개변수를 받지 않는다.**
+     모델명을 빌더로 보내지 않으므로 노드에 functools.partial 을 걸 일도 없다.
+     (app 은 모델별로 그래프를 여러 벌 빌드하느라 model_name 을 받는다)
+  2. ActionAgent 자리가 평범한 워커 노드다.
+     (app 은 여기에 턴 기반 HITL 단일 노드를 끼운다 — 그게 이번 작업)
 """
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from origin import _node, _state
 
+# ── 프로세스 공용 체크포인터 ──────────────────────────────────────────────
+# HITL 진행 상태가 아니라 '대화 맥락' 이 여기 달려 있다. 채팅 세션 하나가
+# thread_id 하나이고, 그 스레드의 messages 를 체크포인터가 들고 있다.
+SHARED_CHECKPOINTER = MemorySaver()
 
-def build_team_graph():
+
+def build_team_graph(checkpointer=None):
     """그래프와 체크포인터를 만들어 돌려준다.
 
-    체크포인터가 thread_id 별 대화 맥락을 들고 있다.
-    (채팅 세션 하나 = thread_id 하나)
+    Args:
+        checkpointer: 쓸 체크포인터. None 이면 프로세스 공용 것을 쓴다.
+                      테스트에서 스레드 상태를 격리하고 싶을 때만 따로 넘긴다.
+
+    모델명은 받지 않는다. 노드가 실행 시점에 state["model_name"] 을 읽는다.
     """
     workflow = StateGraph(_state.AgentState)
 
@@ -49,11 +58,11 @@ def build_team_graph():
     workflow.add_node("FinalGeneralAgent", _node.final_general_node)
 
     # --- 배선
-    workflow.add_edge(START, "Router")
-
     # 워커는 실행 후 무조건 Supervisor 로 복귀한다
     for member in _node.members:
         workflow.add_edge(member, "Supervisor")
+
+    workflow.add_edge(START, "Router")
 
     # Router -> 일반 / 업무
     # Router 는 next 에 노드 이름이 아니라 route 값을 담아 준다
@@ -79,7 +88,7 @@ def build_team_graph():
     workflow.add_edge("FinalAnswerAgent", END)
     workflow.add_edge("FinalGeneralAgent", END)
 
-    checkpointer = MemorySaver()
+    checkpointer = checkpointer or SHARED_CHECKPOINTER
     graph = workflow.compile(checkpointer=checkpointer)
 
     return graph, checkpointer
