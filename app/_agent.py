@@ -12,7 +12,7 @@
   ActionAgent     : 명령 실행 (HITL — actions/node.py 가 담당)
   FinalAnswerAgent / FinalGeneralAgent : 최종 응답 생성(스트리밍)
 """
-import json
+from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -20,10 +20,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field
 
-import app.config as cfg
 from app import _prompt, _tool, _util
-from app._llm import ECHO_MARKER, get_llm, structured_invoke
-from app.actions import resolvers
+from app._llm import get_llm, structured_invoke
 from app.actions.registry import ACTION_REGISTRY
 
 
@@ -55,13 +53,6 @@ def disable_tool_caching(tools_list: list) -> list:
 # Router — 일반 질의인지 업무 질의인지
 # ─────────────────────────────────────────────────────────────────────────
 
-# 목업 모드에서 supervisor 로 보낼 키워드
-_SUPERVISOR_HINT = (
-    "반송", "이송", "옮겨", "이동", "목적지", "위치", "어디", "상태",
-    "로그", "이력", "에러", "원인", "캐리어", "장비", "추출", "명령",
-)
-
-
 async def classify_route_with_llm(
     user_query: str,
     model_name: str = None,
@@ -85,24 +76,6 @@ async def classify_route_with_llm(
         f"질문: {user_query}"
     ).strip()
 
-    # 목업 모드: LLM 없이 키워드로 판단하되, 호출 경로는 동일하게 태운다
-    if cfg.FAKE_LLM:
-        hit = (
-            any(k in user_query for k in _SUPERVISOR_HINT)
-            or bool(resolvers.extract_ids(user_query)["carrier_ids"])
-        )
-        route = "supervisor" if hit else "general"
-
-        content = json.dumps({"route": route}, ensure_ascii=False)
-        _util.fake_llm_echo("router", content, model_name=model_name)
-        _log(f"router(fake) -> {route}")
-
-        if return_raw:
-            return {"query": user_query, "route": route,
-                    "raw": content, "parsed": {"route": route}}
-        return route
-
-    # 실제 게이트웨이 호출
     llm = get_llm(model_name, temperature)
     resp = await llm.ainvoke([
         SystemMessage(content=system_prompt),
@@ -241,6 +214,34 @@ def create_extract_agent(model_name: str = None):
     )
 
 
+class ExtractGateOut(BaseModel):
+    pass_gate: bool = Field(True, description="뒤 워커를 돌릴 가치가 있으면 true")
+
+
+def classify_extract_gate(text: str, config=None, model_name: str = None) -> bool:
+    """ID 가 하나도 안 나왔을 때, 그래도 워커를 돌릴지 LLM 이 판단한다.
+
+    실패 시 True 로 폴백한다. 워커를 헛돌리는 쪽이 필요한 조회를
+    통째로 건너뛰는 쪽보다 안전하다.
+    """
+    try:
+        out = structured_invoke(
+            get_llm(model_name, temperature=0.0),
+            ExtractGateOut,
+            [
+                SystemMessage(content=_prompt.extract_gate_prompt().strip()),
+                HumanMessage(content=f"발화: {text}"),
+            ],
+            config=config,
+        )
+        _log(f"extract gate(llm) -> {out.pass_gate}")
+        return bool(out.pass_gate)
+
+    except Exception as e:
+        _log(f"extract gate llm 실패({e}) -> 통과 폴백")
+        return True
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Supervisor — 어떤 워커로 보낼지 결정
 # ─────────────────────────────────────────────────────────────────────────
@@ -255,25 +256,6 @@ def supervisor_agent(text: str, members: list, config=None, model_name: str = No
     needs-핸드오프 / ExtractAgent 선행 / 진행 중 액션 같은 결정적 규칙은
     supervisor_node 가 먼저 처리하고, 여기는 그 뒤에만 불린다.
     """
-    # 목업 모드: 키워드 기반 선택
-    if cfg.FAKE_LLM:
-        if resolvers.detect_intent(text) or any(k in text for k in ("명령", "실행", "요청")):
-            nxt = "ActionAgent"
-        elif "위치" in text or "어디" in text:
-            nxt = "LocationAgent"
-        elif "상태" in text:
-            nxt = "StatusAgent"
-        elif any(k in text for k in ("로그", "이력", "에러", "원인")):
-            nxt = "LogAgent"
-        else:
-            nxt = "FinalAnswerAgent"
-
-        _util.fake_llm_echo("supervisor", json.dumps({"next": nxt}, ensure_ascii=False),
-                            config=config, model_name=model_name)
-        _log(f"supervisor(fake) -> {nxt}")
-        return nxt
-
-    # 실제 LLM 호출
     try:
         out = structured_invoke(
             get_llm(model_name, temperature=0.0),
@@ -325,25 +307,6 @@ def needs_dispatch(needs: dict, members: list, config=None,
     """
     answer = str(needs.get("answer") or "")
 
-    # 목업 모드: 참조 패턴 규칙이 LLM 자리를 대신한다 (데모/테스트용)
-    if cfg.FAKE_LLM:
-        ref = resolvers.detect_reference(answer)
-        agent, query = None, None
-        if ref and ref["kind"] == "carrier_location" and "LocationAgent" in members:
-            agent = "LocationAgent"
-            query = f"{ref.get('carrier_id')} 위치 알려줘"
-        elif ref and ref["kind"] == "log_analysis" and "LogAgent" in members:
-            agent = "LogAgent"
-            query = f"{ref.get('carrier_id') or ''} 반송 로그 분석해줘".strip()
-
-        _util.fake_llm_echo("needs_dispatch",
-                            json.dumps({"agent": agent, "query": query},
-                                       ensure_ascii=False),
-                            config=config, model_name=model_name)
-        _log(f"needs_dispatch(fake) -> {agent} query='{query}'")
-        return {"agent": agent, "query": query}
-
-    # 실제 LLM 호출
     try:
         out: DispatchOut = structured_invoke(
             get_llm(model_name, temperature=0.0),
@@ -384,20 +347,21 @@ class IntentOut(BaseModel):
     cancel: bool = False
 
 
-def extract_intent(text: str, config=None, model_name: str = None) -> resolvers.IntentResult:
-    """자연어 -> (액션, 파라미터, 참조, 취소) 구조화 추출."""
-    # 목업 모드: 규칙 기반 파서
-    if cfg.FAKE_LLM:
-        r = resolvers.parse_intent(text)
-        _util.fake_llm_echo(
-            "action_intent",
-            json.dumps({"action": r.action, "params": r.params}, ensure_ascii=False),
-            config=config,
-            model_name=model_name,
-        )
-        return r
+@dataclass
+class IntentResult:
+    """의도 추출 결과 (ActionAgent 가 스크래치를 만들 때 쓴다)."""
+    action: str | None = None            # transport | dest_req | None
+    params: dict = field(default_factory=dict)
+    reference: dict | None = None        # {kind, carrier_id, fill}
+    cancel: bool = False
 
-    # 실제 LLM 호출
+
+def extract_intent(text: str, config=None, model_name: str = None) -> IntentResult:
+    """자연어 -> (액션, 파라미터, 참조, 취소) 구조화 추출.
+
+    LLM 이 실패하면 빈 결과를 돌려준다 — 그러면 ActionAgent 가 파라미터를
+    사용자에게 물어보는 정상 경로로 흘러간다(추측하지 않는다).
+    """
     try:
         spec_desc = "\n".join(
             f"- {s.name}({s.label}): 필수 {s.required_params}"
@@ -422,7 +386,7 @@ def extract_intent(text: str, config=None, model_name: str = None) -> resolvers.
             config=config,
         )
 
-        r = resolvers.IntentResult(
+        r = IntentResult(
             action=None if out.action == "unknown" else out.action,
             params={
                 k: v for k, v in
@@ -439,16 +403,16 @@ def extract_intent(text: str, config=None, model_name: str = None) -> resolvers.
         return r
 
     except Exception as e:
-        _log(f"extract_intent llm 실패({e}) -> 규칙 폴백")
-        return resolvers.parse_intent(text)
+        _log(f"extract_intent llm 실패({e}) -> 빈 결과 (사용자에게 물어본다)")
+        return IntentResult()
 
 
 # ─────────────────────────────────────────────────────────────────────────
 # ActionAgent 판단부 — action_node 가 가지는 에이전트
 #
 # 사내 규칙: 이런 결정은 전부 LLM 이 한다. 노드는 판단하지 않고 이 에이전트를
-# 호출만 한다. resolvers 의 정규식은 FAKE_LLM 모드(데모/테스트)와 LLM 실패
-# 폴백에서만 쓰인다.
+# 호출만 한다. 규칙 기반 판단은 이 코드베이스에 존재하지 않는다.
+# LLM 이 실패하면 추측하지 않고 안전한 쪽(재질문/미승인)으로 떨어진다.
 # ─────────────────────────────────────────────────────────────────────────
 
 class CollectAnswerOut(BaseModel):
@@ -462,23 +426,17 @@ def classify_collect_answer(fieldname: str, answer, current_action: str | None,
                             model_name: str = None) -> dict:
     """파라미터 질문에 대한 사용자 답변을 분류한다.
 
-    반환 dict 는 resolvers.resolve_param_answer 와 같은 모양이다:
-      {"kind": cancel|consult|switch|action|value|empty, "text"/"value"/"note"...}
+    반환: {"kind": cancel|consult|switch|action|value|empty, "text"/"value"/"note"...}
 
     value 로 분류돼도 실제 ID 인식·존재 확인은 판독기 툴(id_reader)이 한다 —
     LLM 은 종류만 판단하고 값은 만들어내지 않는다.
     """
     text = str(answer or "")
 
-    # 목업 모드: 규칙 해석기가 LLM 자리를 대신한다
-    if cfg.FAKE_LLM:
-        r = resolvers.resolve_param_answer(fieldname, answer, current_action)
-        _util.fake_llm_echo("action_collect_answer",
-                            json.dumps({"kind": r["kind"]}, ensure_ascii=False),
-                            config=config, model_name=model_name)
-        return r
+    # /chat/stop 등이 보내는 기계 센티널 — 모델에 물을 것도 없다
+    if isinstance(answer, dict) and answer.get("aborted"):
+        return {"kind": "cancel"}
 
-    # 실제 LLM 호출
     try:
         out: CollectAnswerOut = structured_invoke(
             get_llm(model_name, temperature=0.0),
@@ -512,8 +470,9 @@ def classify_collect_answer(fieldname: str, answer, current_action: str | None,
         return {"kind": "empty", "note": f"답변에서 {fieldname} 값을 찾지 못했습니다."}
 
     except Exception as e:
-        _log(f"classify_collect_answer llm 실패({e}) -> 규칙 폴백")
-        return resolvers.resolve_param_answer(fieldname, answer, current_action)
+        # 추측하지 않는다 — 다시 묻는 게 가장 안전하다
+        _log(f"classify_collect_answer llm 실패({e}) -> 재질문")
+        return {"kind": "empty", "note": "답변을 이해하지 못했습니다. 다시 알려주세요."}
 
 
 class ConfirmOut(BaseModel):
@@ -527,19 +486,13 @@ def classify_confirm(answer, action: str = None, params: dict = None,
     approve 는 명시적 동의일 때만. 정정 시도("STK103 으로 바꿔줘")는
     unclear 로 돌려서 호출부가 수집 루프로 되돌릴 수 있게 한다.
     """
-    # dict 센티널(/chat/stop 등)은 규칙이 정확하다 — LLM 태울 이유가 없다
+    # /chat/stop 등이 보내는 기계 센티널 — 모델에 물을 것도 없다
     if isinstance(answer, dict):
-        return resolvers.detect_confirm_verdict(answer)
+        if answer.get("aborted"):
+            return "reject"
+        if "approved" in answer:
+            return "approve" if answer["approved"] else "reject"
 
-    # 목업 모드: 규칙 판정기가 LLM 자리를 대신한다
-    if cfg.FAKE_LLM:
-        v = resolvers.detect_confirm_verdict(answer)
-        _util.fake_llm_echo("action_confirm",
-                            json.dumps({"verdict": v}, ensure_ascii=False),
-                            config=config, model_name=model_name)
-        return v
-
-    # 실제 LLM 호출
     try:
         out: ConfirmOut = structured_invoke(
             get_llm(model_name, temperature=0.0),
@@ -557,20 +510,9 @@ def classify_confirm(answer, action: str = None, params: dict = None,
         return out.verdict
 
     except Exception as e:
-        _log(f"classify_confirm llm 실패({e}) -> 규칙 폴백")
-        return resolvers.detect_confirm_verdict(answer)
-
-
-def answer_seems_informative(text: str, config=None, model_name: str = None) -> bool:
-    """'판독기로 값은 못 읽었지만 정보가 실린 답'인지 — 상담을 태울지 결정.
-
-    실모드에서는 이 지점에 오는 답이 이미 LLM 에게 value(정보성)로 분류된
-    상태이므로 그 판단을 신뢰한다(추가 호출 없음). 규칙 휴리스틱은
-    FAKE 모드에서만 쓴다.
-    """
-    if cfg.FAKE_LLM:
-        return resolvers.looks_substantive(text)
-    return True
+        # 실행은 위험하다 — 판정 못 하면 절대 승인하지 않는다
+        _log(f"classify_confirm llm 실패({e}) -> unclear (미승인)")
+        return "unclear"
 
 
 class _ActionAgent:
@@ -580,12 +522,10 @@ class _ActionAgent:
       - extract_intent            : 최초 발화 -> 의도/파라미터/참조
       - classify_collect_answer   : 파라미터 질문의 답 -> 종류 분류
       - classify_confirm          : 승인 질문의 답 -> approve/reject/unclear
-      - answer_seems_informative  : 못 읽은 답에 정보가 실렸는지
     """
     extract_intent = staticmethod(extract_intent)
     classify_collect_answer = staticmethod(classify_collect_answer)
     classify_confirm = staticmethod(classify_confirm)
-    answer_seems_informative = staticmethod(answer_seems_informative)
 
 
 action_agent = _ActionAgent()
@@ -657,10 +597,10 @@ def _make_final_agent(system_prompt: str, role: str, model_name: str = None):
         # 1) 오염된 메시지 제거
         messages = _clean_messages(state.get("messages", []) or [])
 
-        # 목업 모드에서는 FakeEcho 가 [ECHO] 뒤 내용을 그대로 뱉으므로,
-        # 앞 단계 처리 결과를 그 마커에 실어 붙인다.
-        if cfg.FAKE_LLM:
-            messages = messages + [HumanMessage(content=f"[ROLE:{role}]\n{ECHO_MARKER}{context}")]
+        # 앞 단계 처리 결과를 마지막 컨텍스트로 붙여 준다
+        if context:
+            messages = messages + [
+                HumanMessage(content=f"[처리 결과]\n{context}")]
 
         # 2) 1차 호출
         text = await _astream_final(chain, messages, config)

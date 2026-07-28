@@ -1,5 +1,7 @@
 """API E2E 테스트 — 실제 HTTP(ASGI) 로 HITL 왕복을 돌린다.
 
+사내 LLM 게이트웨이가 붙어 있어야 돈다 (목업 LLM 은 없다).
+
 스트림은 최종 답변을 raw text 로 흘리고, 제어 정보만 \\x1e 로 시작하는
 JSON 한 줄로 보낸다. 아래 parse_stream 이 그걸 갈라낸다.
 
@@ -16,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 import httpx
 
 from app.api.main import app
+from tests._preflight import require_gateway
 
 BASE = "http://test/llm/api"
 EVENT_PREFIX = "\x1e"
@@ -67,6 +70,8 @@ def kinds(events):
 
 
 async def main():
+    require_gateway()
+
     transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test",

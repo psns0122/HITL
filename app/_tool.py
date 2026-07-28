@@ -9,7 +9,8 @@
 """
 from langchain_core.tools import tool
 
-from app.actions import mock_db, resolvers
+from app.actions import mock_db
+from app.id_reader import extract_ids
 
 
 def _log(tool_name: str, msg: str):
@@ -195,7 +196,7 @@ def params_extract_tool(text: str) -> str:
     """
     _log("params_extract", f"enter text={text!r}")
 
-    ids = resolvers.extract_ids(text)
+    ids = extract_ids(text)
     carriers = ids.get("carrier_ids") or []
     eqps = ids.get("eqp_ids") or []
 

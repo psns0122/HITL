@@ -14,7 +14,7 @@
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env          # FAKE_LLM=1 이면 LLM 없이도 전부 동작합니다
+cp .env.example .env          # 사내 LLM 게이트웨이 주소/모델명을 채웁니다
 
 # 터미널 1 — API 서버
 uvicorn app.api.main:app --reload --port 8000
@@ -30,8 +30,9 @@ python3 tests/test_api_sse.py          # SSE API E2E (신규턴/재개/중단/�
 python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실제 서버 왕복)
 ```
 
-> 셋 다 `FAKE_LLM=1` 로 돌아가므로 사내 LLM endpoint 없이 검증됩니다.
-> `FAKE_LLM=0`(실제 LLM) 경로는 사내에서 한 번 확인해 주세요.
+> 목업 LLM 은 없습니다 — 라우팅·의도 추출·답변 분류·승인 판정을 전부 실제 모델이
+> 하므로, 세 테스트 모두 **사내 LLM 게이트웨이가 붙어 있어야** 돕니다.
+> 못 붙으면 `tests/_preflight.py` 가 이유를 찍고 멈춥니다.
 
 모델은 **프론트에서 고릅니다** (사이드바 드롭다운). 고른 모델명이 요청에 실려 오고,
 서버는 그 모델명을 키로 그래프를 캐싱합니다.
@@ -469,7 +470,6 @@ ACTION_REGISTRY["hold_carrier"] = ActionSpec(
 1. `.env` 에 사내 값 채우기 — **변수 이름을 `pptx-vision-rag` 와 동일하게 맞춰뒀으니
    기존 `.env` 의 게이트웨이 설정을 그대로 복사**하면 됩니다.
    ```bash
-   FAKE_LLM=0
    LLM_GATEWAY_BASE_URL=http://hcp.llm.skhynix.com/v1
    LLM_GATEWAY_API_KEY=            # 사내 게이트웨이는 키 불필요 → 비워둠
    LLM_CHAT_MODEL=GaiA-LLM-Latest

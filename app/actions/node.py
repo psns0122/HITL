@@ -5,8 +5,8 @@
 이 노드는 판단하지 않는다. 의도 추출·답변 분류·승인 판정 같은 결정은 전부
 action_node 가 가진 에이전트(_agent.action_agent)가 LLM 으로 한다. 노드는
 그 결과에 따라 수집 루프를 돌리고 턴을 닫는 흐름만 담당한다.
-(resolvers 의 정규식 규칙은 FAKE_LLM 모드와 LLM 실패 폴백에서만 쓰인다.
- 예외는 ID 인식 — 이것은 LLM 판단이 아니라 판독기 툴의 DB 조회다.)
+(LLM 호출이 실패하면 값을 지어내지 않고 "다시 물어본다" 는 안전한 기본값으로
+ 떨어진다. 예외는 ID 인식 — 이것은 LLM 판단이 아니라 판독기 툴의 DB 조회다.)
 
 hitl_new(서브그래프 13노드)의 동작을 그대로 유지하면서 노드 함수 하나로 접었다.
 부모 그래프에서는 똑같이 Supervisor 밑 member 노드 하나다.
@@ -48,12 +48,11 @@ import app.config as cfg
 from app._agent import action_agent
 from app._state import AgentState
 from app._util import emit, last_human_text
-from app.actions import resolvers
 from app.actions.registry import ACTION_REGISTRY, ACTION_SELECT_PROMPT
 from app.actions.tools import param_check_tool
 # ID 판독기는 ExtractAgent 소유의 툴이지만, HITL 수집 루프는 답변마다 판독이
 # 필요해 Supervisor 왕복을 태울 수 없다. 예외적으로 툴만 공용으로 빌려 쓴다.
-from app.id_reader import id_lookup_tool
+from app.id_reader import id_candidates, id_lookup_tool
 
 # 진행 중으로 취급하는 phase (재진입 판정 기준)
 ACTIVE_PHASES = {"param_check", "collecting", "awaiting_helper", "validating", "confirming"}
@@ -74,7 +73,7 @@ def _read_ids(text: str, config) -> dict:
 
     트레이스에 입력(text/후보)과 결과(ids)를 남긴다.
     """
-    cands = resolvers.id_candidates(text)
+    cands = id_candidates(text)
     ids = id_lookup_tool(cands)
     emit(config, "tool_call", {
         "agent": "ActionAgent",
@@ -332,7 +331,7 @@ def _consume_confirm_answer(sc: dict, decision, config, model_name=None):
     # 판정 불가 — 승인/거절이 아니라 '파라미터를 고치려는 답변'일 수 있다.
     # 여기서 바로 접어버리면 그때까지 수집한 값이 통째로 날아가므로,
     # ID 후보가 실려 있으면 수집 루프로 되돌린다.
-    cands = resolvers.id_candidates(str(decision))
+    cands = id_candidates(str(decision))
     if not cands:
         sc["phase"] = "abandoned"
         sc["abandon_reason"] = "승인 여부를 확인하지 못해 명령을 종료합니다."

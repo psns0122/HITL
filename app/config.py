@@ -86,9 +86,7 @@ def _as_float(name: str, default: float) -> float:
 
 
 # ── LLM 게이트웨이 (OpenAI 호환) ──────────────────────────────────────────
-# 1 이면 LLM 없이 규칙 기반 목업으로 동작 (HITL 검증/데모용)
-FAKE_LLM = _as_bool(_get("FAKE_LLM", "1"))
-
+# 목업 LLM 은 없다. 모든 판단은 아래 게이트웨이의 실제 모델이 한다.
 GATEWAY_BASE_URL = _get("LLM_GATEWAY_BASE_URL", "http://hcp.llm.skhynix.com/v1",
                         "OPENAI_BASE_URL")
 # 사내 게이트웨이는 키를 요구하지 않으므로 빈 값 허용

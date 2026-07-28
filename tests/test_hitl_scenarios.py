@@ -1,4 +1,6 @@
-"""HITL 시나리오 E2E 테스트 (FAKE_LLM 모드, 그래프 직접 invoke).
+"""HITL 시나리오 E2E 테스트 — 그래프를 직접 invoke 한다.
+
+사내 LLM 게이트웨이가 붙어 있어야 돈다 (목업 LLM 은 없다).
 
 턴 기반 HITL: 모든 사용자 입력(최초 질문·HITL 답변)이 똑같이 새 턴으로
 들어가 Router → Supervisor 를 경유한다. interrupt/resume 은 쓰지 않는다.
@@ -15,9 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from langchain_core.messages import HumanMessage
 
 from app._builder import build_team_graph
+from tests._preflight import require_gateway
 
 
 async def main():
+    require_gateway()
+
     graph, cp = build_team_graph()
 
     def C(t):

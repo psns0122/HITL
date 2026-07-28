@@ -229,7 +229,6 @@ add_edge(member, "Supervisor")`)가 도는 건 사내 코드 그대로면 자동
 | LLM | `_llm.get_llm` | 이미 게이트웨이 규약(placeholder EMPTY 등) 맞춰둠. 사내 llm_t1 이 있으면 그걸로 |
 | 워커 스텁 | `_node.py` 의 location/status/log/extract | 사내 실제 노드로 교체. **계약 하나만 유지**: 결과를 `AIMessage(name=에이전트명)` 으로 messages 에 남길 것 (Supervisor 의 상담 회수가 그걸 읽음) |
 | 프롬프트 | `_prompt.py` | 문구 교체 자유 |
-| 모드 전환 | `.env` `FAKE_LLM=0` | 마지막에 |
 
 **확인**: 교체 하나마다 `tests/test_hitl_scenarios.py` 재실행.
 
@@ -238,7 +237,6 @@ add_edge(member, "Supervisor")`)가 도는 건 사내 코드 그대로면 자동
 ## 이식하지 않는 것
 
 - `mock_db.py` 의 데이터 (교체 대상)
-- `FakeEchoChatModel` (`_llm.py`) — 사내에서도 LLM 없이 테스트하려면 남겨두면 유용
 - `streamlit_app.py` — 사내 프론트가 따로 있으면 `stream_chat()` 파서만 가져감
 - `notebooks/`, `docs/`, `tests/` — 원하는 만큼만
 

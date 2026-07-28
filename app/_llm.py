@@ -3,26 +3,10 @@
 프론트에서 모델을 골라 보내면 그 모델로 그래프를 돌린다.
 model_name 이 None 이면 .env 의 기본 모델(LLM_CHAT_MODEL)을 쓴다.
 
-동작 모드
-- FAKE_LLM=0 : 사내 OpenAI 호환 게이트웨이 (ChatOpenAI)
-- FAKE_LLM=1 : FakeEchoChatModel — 프롬프트의 [ECHO] 뒤 내용을 그대로 스트리밍으로
-               돌려주는 목업. LLM 없이도 on_chat_model_stream 이벤트와
-               usage_metadata 가 실제처럼 발생해 SSE/토큰 원장 검증이 가능하다.
+사내 OpenAI 호환 게이트웨이(ChatOpenAI)로만 붙는다. 목업 모델은 없다 —
+모든 판단은 실제 LLM 이 한다.
 """
-from typing import Any, AsyncIterator, Iterator, List, Optional
-
-from langchain_core.callbacks import (
-    AsyncCallbackManagerForLLMRun,
-    CallbackManagerForLLMRun,
-)
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
-
 import app.config as cfg
-
-# FakeEchoChatModel 이 "여기부터 응답" 이라고 인식하는 마커
-ECHO_MARKER = "[ECHO]"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -79,115 +63,6 @@ def list_models() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 목업 챗모델
-# ─────────────────────────────────────────────────────────────────────────
-
-def _estimate_tokens(text: str) -> int:
-    """대충 3글자 = 1토큰으로 잡는다. 목업 usage 용."""
-    return max(1, len(text) // 3)
-
-
-class FakeEchoChatModel(BaseChatModel):
-    """[ECHO] 마커 뒤 텍스트를 그대로 반환/스트리밍하는 목업 챗모델."""
-
-    chunk_size: int = 8
-
-    @property
-    def _llm_type(self) -> str:
-        return "fake-echo"
-
-    def bind_tools(self, tools, **kwargs):
-        """create_react_agent 가 요구해서 뚫어둔 자리.
-
-        목업 모델은 툴을 실제로 호출하지 않으므로 자기 자신을 그대로 돌려준다.
-        (이게 없으면 BaseChatModel.bind_tools 가 NotImplementedError 를 던져
-         FAKE_LLM 모드에서 react 에이전트를 만들 수 없다.)
-        """
-        return self
-
-    def _payload(self, messages: List[BaseMessage]) -> tuple[str, int]:
-        """프롬프트에서 응답으로 쓸 부분을 잘라내고 입력 토큰 수를 센다."""
-        joined = "\n".join(str(m.content) for m in messages)
-
-        if ECHO_MARKER in joined:
-            out = joined.split(ECHO_MARKER, 1)[1].strip()
-        else:
-            out = "OK"
-
-        return out, _estimate_tokens(joined)
-
-    def _usage(self, in_tok: int, out: str) -> dict:
-        out_tok = _estimate_tokens(out)
-        return {
-            "input_tokens": in_tok,
-            "output_tokens": out_tok,
-            "total_tokens": in_tok + out_tok,
-        }
-
-    def _generate(
-        self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
-        **kwargs: Any,
-    ) -> ChatResult:
-        out, in_tok = self._payload(messages)
-
-        msg = AIMessage(
-            content=out,
-            usage_metadata=self._usage(in_tok, out),
-            response_metadata={"finish_reason": "stop"},
-        )
-        return ChatResult(generations=[ChatGeneration(message=msg)])
-
-    def _make_chunk(self, piece: str, is_last: bool, in_tok: int, out: str):
-        """스트리밍 청크 하나. usage 는 마지막 청크에만 싣는다."""
-        return ChatGenerationChunk(
-            message=AIMessageChunk(
-                content=piece,
-                usage_metadata=self._usage(in_tok, out) if is_last else None,
-                response_metadata={"finish_reason": "stop"} if is_last else {},
-            )
-        )
-
-    def _stream(
-        self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
-        **kwargs: Any,
-    ) -> Iterator[ChatGenerationChunk]:
-        out, in_tok = self._payload(messages)
-
-        for i in range(0, len(out), self.chunk_size):
-            piece = out[i:i + self.chunk_size]
-            is_last = i + self.chunk_size >= len(out)
-
-            chunk = self._make_chunk(piece, is_last, in_tok, out)
-            if run_manager:
-                run_manager.on_llm_new_token(piece, chunk=chunk)
-            yield chunk
-
-    async def _astream(
-        self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
-        **kwargs: Any,
-    ) -> AsyncIterator[ChatGenerationChunk]:
-        out, in_tok = self._payload(messages)
-
-        for i in range(0, len(out), self.chunk_size):
-            piece = out[i:i + self.chunk_size]
-            is_last = i + self.chunk_size >= len(out)
-
-            chunk = self._make_chunk(piece, is_last, in_tok, out)
-            if run_manager:
-                await run_manager.on_llm_new_token(piece, chunk=chunk)
-            yield chunk
-
-
-# ─────────────────────────────────────────────────────────────────────────
 # LLM 팩토리
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -201,9 +76,6 @@ def get_llm(model_name: str | None = None, temperature: float | None = None):
     사내 게이트웨이는 OpenAI 호환 엔드포인트라 ChatOpenAI 로 붙는다.
     호출 패턴은 사내 기존 프로젝트(pptx-vision-rag/llm_client.py)와 동일하게 맞췄다.
     """
-    if cfg.FAKE_LLM:
-        return FakeEchoChatModel()
-
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(

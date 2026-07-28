@@ -8,7 +8,6 @@ import re
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from app._llm import ECHO_MARKER, get_llm
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -170,19 +169,3 @@ def normalize_route_label(content: str) -> str:
         return "supervisor"
 
     return "supervisor"
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# 목업 모드 보조
-# ─────────────────────────────────────────────────────────────────────────
-
-def fake_llm_echo(role: str, payload: str, config=None, model_name: str = None,
-                  extra_context: str = "") -> AIMessage:
-    """FAKE_LLM 모드에서 규칙 기반 결정을 '모델 호출'처럼 통과시킨다.
-
-    이렇게 해야 on_chat_model_end / usage_metadata 가 에이전트별로 잡혀서
-    토큰 원장 집계가 실제와 같은 경로로 검증된다.
-    """
-    llm = get_llm(model_name)
-    prompt = f"[ROLE:{role}]\n{extra_context}\n{ECHO_MARKER}{payload}"
-    return llm.invoke([HumanMessage(content=prompt)], config=config)

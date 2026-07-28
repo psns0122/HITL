@@ -12,11 +12,11 @@ from app import _agent, _state
 from app._util import (
     agent_ran_this_turn,
     emit,
-    fake_llm_echo,
     last_user_text,
     member_answered_this_turn,
 )
-from app.actions import mock_db, resolvers
+from app.actions import mock_db
+from app.id_reader import extract_ids
 
 # Supervisor 밑에 붙는 워커들
 members = ["StatusAgent", "LocationAgent", "LogAgent", "ActionAgent", "ExtractAgent"]
@@ -280,10 +280,8 @@ def location_node(state: _state.AgentState, config, model_name: str = None) -> d
     print("[NODE] LocationAgent entered", flush=True)
     emit(config, "agent_status", {"agent": "LocationAgent", "detail": "위치 조회"})
 
-    model = model_name or _model_of(state)
-
     text = last_user_text(state.get("messages", []))
-    ids = resolvers.extract_ids(text)
+    ids = extract_ids(text)
 
     lines, facts = [], {}
     for c in ids["carrier_ids"]:
@@ -297,7 +295,6 @@ def location_node(state: _state.AgentState, config, model_name: str = None) -> d
             lines.append(f"캐리어 {c} 를 찾을 수 없습니다.")
 
     content = "\n".join(lines) or "질의에서 캐리어 ID 를 찾지 못했습니다."
-    fake_llm_echo("location", content, config=config, model_name=model)
 
     return {
         "messages": [AIMessage(content=content, name="LocationAgent")],
@@ -312,8 +309,7 @@ def status_node(state: _state.AgentState, config, model_name: str = None) -> dic
     emit(config, "agent_status", {"agent": "StatusAgent", "detail": "상태 조회"})
 
     text = last_user_text(state.get("messages", []))
-    ids = resolvers.extract_ids(text)
-    model = model_name or _model_of(state)
+    ids = extract_ids(text)
 
     lines = []
     for c in ids["carrier_ids"]:
@@ -328,7 +324,6 @@ def status_node(state: _state.AgentState, config, model_name: str = None) -> dic
             lines.append(f"캐리어 {c} 를 찾을 수 없습니다.")
 
     content = "\n".join(lines) or "질의에서 캐리어 ID 를 찾지 못했습니다."
-    fake_llm_echo("status", content, config=config, model_name=model)
 
     return {
         "messages": [AIMessage(content=content, name="StatusAgent")],
@@ -344,11 +339,9 @@ def log_node(state: _state.AgentState, config, model_name: str = None) -> dict:
     print("[NODE] LogAgent entered", flush=True)
     emit(config, "agent_status", {"agent": "LogAgent", "detail": "반송 이력 분석"})
 
-    model = model_name or _model_of(state)
-
     # 분석 대상 캐리어: 발화 내 ID > 전체
     text = last_user_text(state.get("messages", []))
-    ids = resolvers.extract_ids(text)
+    ids = extract_ids(text)
     carrier = ids["carrier_ids"][0] if ids["carrier_ids"] else None
 
     emit(config, "tool_call", {"agent": "LogAgent", "tool": "log_search_tool",
@@ -366,7 +359,6 @@ def log_node(state: _state.AgentState, config, model_name: str = None) -> dict:
         + [f"- 원인 장비: {analysis['cause_eqp']}",
            f"- 권장 대체 목적지: {analysis['recommended_dest']}"]
     )
-    fake_llm_echo("log", content, config=config, model_name=model)
 
     return {
         "messages": [AIMessage(content=content, name="LogAgent")],
@@ -393,7 +385,7 @@ def extract_node(state: _state.AgentState, config, model_name: str = None) -> di
     fab = "M16"
 
     # params_extract_tool 상당 — 발화에서 ID 를 뽑는다
-    ids = resolvers.extract_ids(text)
+    ids = extract_ids(text)
     emit(config, "tool_call", {"agent": "ExtractAgent", "tool": "params_extract_tool",
                                "args": {"text": text}, "result": ids})
 
@@ -401,18 +393,18 @@ def extract_node(state: _state.AgentState, config, model_name: str = None) -> di
     eqps = ids.get("eqp_ids") or []
 
     # 게이트 판정: 이후 워커가 쓸 재료가 하나라도 있는가.
-    #   ID 가 있거나 / 명령 의도가 있거나 / 다른 에이전트 영역 키워드가 있으면 통과.
-    #   아무것도 없으면 통과 실패 -> Supervisor 가 워커를 안 돌리고 바로 Final 로 보낸다(항목 6).
-    gate_pass = bool(
-        carriers or eqps
-        or resolvers.detect_intent(text)
-        or resolvers.CONTEXT_SWITCH_RE.search(text or "")
-    )
+    #   ID 가 하나라도 나왔으면 볼 것도 없이 통과.
+    #   하나도 없을 때만 LLM 에게 "그래도 워커를 돌릴 발화인가?" 를 묻는다.
+    #   (ID 없는 명령 요청 "반송 걸어줘" 는 통과시켜야 ActionAgent 가 되물을 수 있다)
+    #   통과 실패면 Supervisor 가 워커를 안 돌리고 바로 Final 로 보낸다(항목 6).
+    if carriers or eqps:
+        gate_pass = True
+    else:
+        gate_pass = _agent.classify_extract_gate(text, config=config, model_name=model)
 
     content = (f"[ExtractAgent] fab={fab}, "
                f"carrier_ids={carriers or '없음'}, eqp_ids={eqps or '없음'} "
                f"(gate={'통과' if gate_pass else '실패'})")
-    fake_llm_echo("extract", content, config=config, model_name=model)
 
     return {
         "messages": [AIMessage(content=content, name="ExtractAgent")],

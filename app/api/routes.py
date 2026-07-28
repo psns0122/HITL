@@ -472,7 +472,6 @@ async def models():
 async def health():
     return {
         "ok": True,
-        "fake_llm": cfg.FAKE_LLM,
         "default_model": _llm.default_model_name(),
         "cached_graphs": cached_models(),
         "time": kst_now_iso(),
