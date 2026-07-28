@@ -111,8 +111,20 @@ def get_llm(model_name: str = None, temperature: float = 0) -> ChatOpenAI:
 
 # *************  [app 전용 — origin 에 없음]  *************
 
+# 사내망 밖(집/로컬 ollama 등)에서 돌려볼 때만 쓰는 덮어쓰기.
+#
+# 위 origin 영역의 `_DEFAULT_MODEL = "GaiA-LLM-Latest"` 줄은 사내 원본과
+# 한 글자도 다르지 않게 두고, 값만 여기서 갈아끼운다. get_llm 은 호출 시점에
+# 모듈 전역을 읽으므로 이 재대입이 그대로 먹는다.
+# .env 에 DEFAULT_MODEL 이 없으면 아무 일도 일어나지 않는다(사내 = 무변화).
+# 사내 반입 시에는 이 [app 전용] 블록만 들어내면 원상복귀된다.
+if cfg.DEFAULT_MODEL:
+    print(f"[LLM] 기본 모델 덮어쓰기: {_DEFAULT_MODEL} -> {cfg.DEFAULT_MODEL}", flush=True)
+    _DEFAULT_MODEL = cfg.DEFAULT_MODEL
+
 # 프론트 드롭다운에 띄울 모델들. 첫 번째가 기본값이다.
-AVAILABLE_MODELS = [
+# .env 의 AVAILABLE_MODELS 가 있으면 그걸 쓴다 (로컬 실행용).
+AVAILABLE_MODELS = cfg.AVAILABLE_MODELS or [
     "GaiA-LLM-Latest",
     "gaia-GLM-5.2",
     "Qwen3.5-397B-A17B-FP8",

@@ -53,6 +53,14 @@ API_PORT = int(_get("API_PORT", "8000"))
 # Streamlit 데모 UI 가 붙을 백엔드 주소
 API_BASE_URL = _get("API_BASE_URL", "http://localhost:8000/llm/api")
 
+# 사내망 밖(로컬 ollama 등)에서 돌릴 때 모델명을 .env 로 갈아끼우기 위한 값.
+# 비워두면 사내 기본값이 그대로 쓰인다 — 사내에서는 아무것도 안 바뀐다.
+#   DEFAULT_MODEL=glm4:latest
+#   AVAILABLE_MODELS=glm4:latest,llama3.2:latest
+DEFAULT_MODEL = _get("DEFAULT_MODEL", "")
+AVAILABLE_MODELS = [m.strip() for m in _get("AVAILABLE_MODELS", "").split(",")
+                    if m.strip()]
+
 # HITL 루프 가드
 MAX_COLLECT = int(_get("MAX_COLLECT", "5"))       # 파라미터 재질문 상한
 MAX_VALIDATE = int(_get("MAX_VALIDATE", "3"))     # 검증 재시도 상한
