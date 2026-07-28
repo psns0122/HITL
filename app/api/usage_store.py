@@ -103,6 +103,11 @@ def mark_first_token(thread_id: str):
     led = _LEDGERS.get(thread_id)
     if led and led["t_first_token"] is None:
         led["t_first_token"] = time.time()
+        # HITL 액션은 첫 최종답변 토큰이 여러 라운드 뒤에야 나온다.
+        # 그때까지 사람이 답을 고민한 시간은 TTFT 가 아니므로, 이 시점까지
+        # 누적된 대기를 기억해 뒀다가 totals 에서 뺀다. (안 빼면 승인에
+        # 1분 고민한 턴의 "첫 응답"이 80초처럼 보인다)
+        led["_human_wait_at_first_token"] = led["human_wait_ms"]
 
 
 def append_answer(thread_id: str, text: str):
@@ -128,6 +133,7 @@ def totals(thread_id: str) -> dict:
     now = led.get("t_completed") or time.time()
     elapsed_ms = int((now - led["t_start"]) * 1000)
     ttft_ms = (int((led["t_first_token"] - led["t_start"]) * 1000)
+               - led.get("_human_wait_at_first_token", 0)
                if led["t_first_token"] else None)
     return {
         "user_input_tokens": led["input_tokens"],
@@ -137,7 +143,7 @@ def totals(thread_id: str) -> dict:
         "total_tokens": tin + tout,
         "hitl_rounds": led["hitl_rounds"],
         "stream_calls": led["n_stream_calls"],
-        "ttft_ms": ttft_ms,                                  # 최초 입력 → 첫 최종토큰
+        "ttft_ms": ttft_ms,                                  # 최초 입력 → 첫 최종토큰 (사람 대기 제외)
         "elapsed_ms": elapsed_ms,                            # 최초 입력 → 종료(사람 대기 포함)
         "human_wait_ms": led["human_wait_ms"],
         "compute_ms": max(0, elapsed_ms - led["human_wait_ms"]),  # 사람 대기 제외
@@ -152,5 +158,6 @@ def finish(thread_id: str) -> dict:
     led["t_completed"] = time.time()
     snapshot = {**led, "totals": totals(thread_id)}
     snapshot.pop("_t_paused_at", None)
+    snapshot.pop("_human_wait_at_first_token", None)
     _LEDGERS.pop(thread_id, None)
     return snapshot

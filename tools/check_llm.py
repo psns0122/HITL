@@ -7,7 +7,8 @@
 
   1) 모델 목록 조회      GET  {base}/models
   2) 일반 대화           POST {base}/chat/completions
-  3) 구조화 출력         POST ... response_format=json_schema   ← 제일 중요
+  3) 구조화 출력         POST ... response_format=json_object   ← 제일 중요
+                         (origin 관례: with_structured_output(..., "json_mode"))
 
 3번이 이 프로젝트의 급소입니다. 라우팅·의도추출·답변분류·승인판정이 전부
 구조화 출력을 쓰기 때문에, 모델이 이걸 못 하면 아무것도 동작하지 않습니다.
@@ -63,13 +64,13 @@ def main():
         return 1
 
     # ── 3) 구조화 출력 (급소)
-    print("\n[3/3] 구조화 출력(response_format=json_schema)...")
+    print("\n[3/3] 구조화 출력(with_structured_output, method=json_mode)...")
     try:
-        from app._agent import SupervisorOut
-        out = _llm.structured_invoke(
-            llm, SupervisorOut,
-            [HumanMessage(content="캐리어를 반송하라는 요청이다. "
-                                  "ActionAgent 를 고르세요.")])
+        from app._node import RouteResponse
+        runner = llm.with_structured_output(RouteResponse, method="json_mode")
+        out = runner.invoke([HumanMessage(
+            content="캐리어를 반송하라는 요청이다. ActionAgent 를 고르세요.\n"
+                    '반드시 JSON 만 출력: {"next": "ActionAgent"}')])
         print(f"  ✅ 구조화 응답: {out!r}")
     except Exception as e:
         print(f"  ❌ 실패: {type(e).__name__}: {e}")

@@ -6,9 +6,12 @@ Location / Status / Log / Extract 는 목업 스텁이다.
 
 ActionAgent 는 actions/node.py 의 턴 기반 단일 노드가 담당한다.
 """
-from langchain_core.messages import AIMessage, HumanMessage
+from typing import Annotated, Literal, TypedDict
 
-from app import _agent, _state
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+from app import _agent, _llm, _prompt, _state
 from app._util import (
     action_service,
     agent_ran_this_turn,
@@ -30,8 +33,43 @@ members = ["StatusAgent", "LocationAgent", "LogAgent", "ActionAgent", "ExtractAg
 # (안 빼면 Extract 가 돌자마자 턴이 끝나버린다.)
 ANSWERING_MEMBERS = [m for m in members if m != "ExtractAgent"]
 
-options_for_next = members + ["FinalAnswerAgent", "FINISH"]
+options_for_next = ["FINISH", "FinalAnswerAgent"] + members
 options_lower_map = {m.lower().replace("_", "").replace("-", ""): m for m in options_for_next}
+
+
+class RouteResponse(TypedDict):
+    next: Annotated[Literal[tuple(options_for_next)], "다음에 실행할 노드"]
+
+
+# 프롬프트 본문에 중괄호가 들어 있으면 ChatPromptTemplate 이 변수로 오인한다.
+# 그래서 이스케이프한 뒤에 템플릿에 넣는다.
+safe_supervisor_prompt = (
+    _prompt.supervisor_agent_prompt().replace("{", "{{").replace("}", "}}")
+)
+
+supervisor_prompt = ChatPromptTemplate.from_messages([
+    ("system", safe_supervisor_prompt + """
+Given the conversation above, who should act next? Or should we FINISH?
+You must select exactly one option from the list below:
+
+{options}
+
+[Strict Output Rule]
+You MUST respond in JSON format with a single key 'next'. Do NOT output anything else.
+Do NOT explain. Example: {{"next": "LocationAgent"}}"""),
+    MessagesPlaceholder("messages"),
+    # *************  [app — origin 에 없는 마지막 한 줄]
+    # origin 은 MessagesPlaceholder 로 끝난다. 그런데 이 대화의 마지막은 거의
+    # 항상 워커의 AIMessage(예: "[ExtractAgent] fab=M16 ...") 라서, 모델이
+    # "다음 담당자를 고르는" 대신 그 문장을 이어 써 버린다. 실측하면 이 줄이
+    # 없을 때 0/5, 있을 때 5/5 로 갈린다(tools/probe_supervisor.py).
+    # 사람 차례로 끝내 주는 것뿐이라 사내 모델에도 무해하다.
+    ("human", "위 대화 기준으로 다음에 일할 담당자를 고르시오. JSON 만 출력."),
+    # *************
+]).partial(
+    options=str(options_for_next),
+    members=", ".join(members),
+)
 
 # Supervisor 무한 순환 방지 상한 (한 user turn 내 노드 스텝)
 MAX_SUPERVISOR_STEPS = 12
@@ -109,7 +147,7 @@ async def general_node(state: _state.AgentState, config) -> dict:
 # Supervisor
 # ─────────────────────────────────────────────────────────────────────────
 
-def supervisor_node(state: _state.AgentState, config) -> dict:
+async def supervisor_node(state: _state.AgentState, config) -> dict:
     """워커 배분. 결정적 규칙을 먼저 보고, 남으면 LLM 에게 묻는다.
 
     우선순위
@@ -154,11 +192,16 @@ def supervisor_node(state: _state.AgentState, config) -> dict:
         # 0-a) 첫 상담 -> 로스터를 보고 도와줄 워커를 고른다 (LLM/규칙).
         #      워커가 보낼 질의문도 여기서 함께 만든다. ActionAgent 는
         #      배분에 관여하지 않고, 워커도 needs 를 모른다.
-        d = _agent.needs_dispatch(needs, members,
+        #      ExtractAgent 는 후보에서 뺀다 — 매 턴 선행 실행되는 재료 준비
+        #      단계이지 참조를 풀어 주는 워커가 아니다. 로스터에 남겨 두면
+        #      fill=eqp_id 라는 말에 끌려 "ID 추출" 로 오해하고 그걸 골라,
+        #      아무것도 못 찾은 채 상담 왕복만 한 번 낭비한다(실측).
+        helpers = [m for m in members if m != "ExtractAgent"]
+        d = _agent.needs_dispatch(needs, helpers,
                                   config=config, model_name=_model_of(state))
         nxt = d.get("agent")
 
-        if nxt in members:
+        if nxt in helpers:
             query = d.get("query") or needs.get("answer") or ""
             print(f"[NODE] Supervisor: needs 상담 -> {nxt} "
                   f"(fill={needs.get('fill')}, query='{query}')", flush=True)
@@ -230,33 +273,63 @@ def supervisor_node(state: _state.AgentState, config) -> dict:
         print(f"[WARN] Supervisor: step {step} >= {MAX_SUPERVISOR_STEPS} -> 강제 종료", flush=True)
         return {"next": "FinalAnswerAgent", "step": step + 1}
 
-    # 6) LLM 기반 배분 (사내 supervisor_chain 자리)
-    #    ExtractAgent 는 후보에서 뺀다 — 3-a 에서 이미 선행 실행됐고,
-    #    후보에 남겨두면 모델이 '추출' 설명에 끌려 계속 골라
-    #    Supervisor <-> ExtractAgent 순환이 생긴다.
-    text = last_user_text(messages)
+    # 6) LLM 기반 배분 — 여기부터는 origin/_node.py 의 supervisor_node 그대로다.
+    #    모델이 뭘 뱉든 그래프가 죽으면 안 되므로 응답을 3단계로 방어한다.
+    #      1. dict 인가  2. next 가 문자열인가  3. 아는 노드 이름인가(정규화 후 재시도)
+
+    # 빈 content 메시지는 게이트웨이가 400 을 뱉는 경우가 있어 미리 걸러낸다
+    raw_messages = state.get("messages", []) or []
+    clean_messages = []
+    for msg in raw_messages:
+        content = getattr(msg, "content", None)
+        if content is None or str(content).strip() == "":
+            continue
+        clean_messages.append(msg)
+
+    supervisor_chain = supervisor_prompt | _llm.get_llm(
+        model_name=state.get("model_name"), temperature=0
+    ).with_structured_output(RouteResponse, method="json_mode")
+
     next_node = "FinalAnswerAgent"
-    dispatchable = [m for m in members if m != "ExtractAgent"]
+
+    # *************  [app — origin 은 여기서 final_message 를 만들어 반환의
+    #  "messages" 에 실어 보낸다. app 은 싣지 않는다: messages 리듀서가 add 라
+    #  기존 리스트를 되돌리면 대화가 통째로 중복 누적된다]
+    # *************
 
     try:
-        raw_next = _agent.supervisor_agent(
-            text, dispatchable, config=config, model_name=_model_of(state))
+        response = await supervisor_chain.ainvoke({"messages": clean_messages},
+                                                  config=config)
 
-        clean_next = str(raw_next).strip().replace("'", "").replace('"', "")
+        if isinstance(response, dict):
+            raw_next = response.get("next", "")
 
-        if clean_next in options_for_next:
-            next_node = clean_next
-        else:
-            # 대소문자/구분자만 다른 경우를 구제한다
-            normalized = clean_next.lower().replace("_", "").replace("-", "")
-            if normalized in options_lower_map:
-                next_node = options_lower_map[normalized]
+            if isinstance(raw_next, str):
+                clean_next = raw_next.strip().replace("'", "").replace('"', "")
+
+                if clean_next in options_for_next:
+                    next_node = clean_next
+                else:
+                    # 대소문자/구분자만 다른 경우를 구제한다
+                    normalized_next = clean_next.lower().replace("_", "").replace("-", "")
+                    if normalized_next in options_lower_map:
+                        next_node = options_lower_map[normalized_next]
+                    else:
+                        print(f"[DEBUG] Supervisor returned an INVALID route word: "
+                              f"'{raw_next}' Defaulting to FinalAnswerAgent.", flush=True)
+                        next_node = "FinalAnswerAgent"
             else:
-                print(f"[WARN] Supervisor: unknown next '{raw_next}' -> FinalAnswerAgent",
-                      flush=True)
+                print(f"[DEBUG] Supervisor returned a NON-STRING value for 'next': "
+                      f"'{raw_next}' Defaulting to FinalAnswerAgent.", flush=True)
+                next_node = "FinalAnswerAgent"
+        else:
+            print(f"[DEBUG] Supervisor response is NOT a dictionary: "
+                  f"'{response}' Defaulting to FinalAnswerAgent.", flush=True)
+            next_node = "FinalAnswerAgent"
 
     except Exception as e:
-        print(f"[ERROR] Supervisor failed: {e}", flush=True)
+        print(f"[ERROR] Supervisor LLM invoke failed: {e}", flush=True)
+        next_node = "FinalAnswerAgent"
 
     if next_node == "FINISH":
         next_node = "FinalAnswerAgent"
@@ -432,25 +505,48 @@ async def action_node(state: _state.AgentState, config) -> dict:
 # ─────────────────────────────────────────────────────────────────────────
 
 async def final_node(state: _state.AgentState, config, model_name: str = None) -> dict:
-    """워커 결과를 받아 최종 답변을 스트리밍으로 만든다."""
+    """워커 결과를 받아 최종 답변을 만든다. (origin/_node.final_node 와 같은 틀)"""
     print("[NODE] FinalAnswer entered", flush=True)
     emit(config, "agent_status", {"agent": "FinalAnswerAgent", "detail": "최종 응답 생성"})
 
-    model = model_name or _model_of(state)
-    messages = state.get("messages", []) or []
+    # *************  [app — 이번 턴에 워커가 낸 답을 근거로 실어 준다.
+    #  origin 은 context 없이 state 만 넘긴다]
+    member_msg = member_answered_this_turn(state.get("messages", []) or [],
+                                           ANSWERING_MEMBERS)
+    context = str(member_msg.content) if member_msg else ""
+    # *************
 
-    # 이번 턴에 워커가 낸 답을 컨텍스트로 쓴다
-    member_msg = member_answered_this_turn(messages, ANSWERING_MEMBERS)
-    context = (str(member_msg.content) if member_msg
-               else "처리 결과가 없습니다. 질문에 답할 수 있는 범위에서 안내하세요.")
+    # create_final_agent 는 _ainvoke(state, config, context) 함수를 돌려준다
+    out = await _agent.create_final_agent(
+        model_name=model_name or _model_of(state))(state, config, context)
 
-    agent = _agent.create_final_agent(model_name=model)
-    content = await agent(state, config=config, context=context)
+    msgs = out.get("messages", []) or []
+
+    if msgs == []:
+        print("[ERROR] 비어있는 FINAL 응답", flush=True)
+    else:
+        msg = msgs[0]
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        finish = msg.response_metadata.get("finish_reason")
+
+        # 빈 본문이거나 정상 종료(stop)가 아니면 폴백 문구로 교체한다
+        is_empty = not content.strip()
+        is_weird_finish = finish not in ("stop", None)
+
+        if is_empty or is_weird_finish:
+            print(f"[ERROR] 비정상 FINAL 응답 종료 "
+                  f"content={content[:80]!r} finish_reason={finish}", flush=True)
+            msgs = [AIMessage(content="응답 생성에 실패했습니다. 다시 시도해주세요.")]
+
+    # *************  [app — 에이전트 이름표를 붙인다. Supervisor 의 '이번 턴에
+    #  누가 답했나' 판정(_util.agent_name_of)이 이 값을 읽는다]
+    msgs = [AIMessage(content=str(m.content), name="FinalAnswerAgent",
+                      additional_kwargs={"agent_name": "FinalAnswerAgent"})
+            for m in msgs]
+    # *************
 
     return {
-        "messages": [AIMessage(content=content,
-name="FinalAnswerAgent",
-additional_kwargs={"agent_name": "FinalAnswerAgent"})],
+        "messages": msgs,
         "next": "END",
         "step": state.get("step", 0) + 1,
     }
@@ -461,19 +557,34 @@ async def final_general_node(state: _state.AgentState, config, model_name: str =
     print("[NODE] FinalGeneral entered", flush=True)
     emit(config, "agent_status", {"agent": "FinalGeneralAgent", "detail": "일반 응답 생성"})
 
-    model = model_name or _model_of(state)
+    out = await _agent.create_final_general_agent(
+        model_name=model_name or _model_of(state))(state, config)
 
-    context = ("안녕하세요! AMHS 반송 시스템 챗봇입니다. "
-               "캐리어 위치/상태 조회, 반송 이력 분석, "
-               "반송요청명령·목적지요청 실행을 도와드릴 수 있어요.")
+    msgs = out.get("messages", []) or []
 
-    agent = _agent.create_final_general_agent(model_name=model)
-    content = await agent(state, config=config, context=context)
+    if msgs == []:
+        print("[ERROR] 비어있는 FINAL 응답", flush=True)
+    else:
+        msg = msgs[0]
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        finish = msg.response_metadata.get("finish_reason")
+
+        is_empty = not content.strip()
+        is_weird_finish = finish not in ("stop", None)
+
+        if is_empty or is_weird_finish:
+            print(f"[ERROR] 비정상 FINAL 응답 종료 "
+                  f"content={content[:80]!r} finish_reason={finish}", flush=True)
+            msgs = [AIMessage(content="응답 생성에 실패했습니다. 다시 시도해주세요.")]
+
+    # *************  [app — 에이전트 이름표]
+    msgs = [AIMessage(content=str(m.content), name="FinalGeneralAgent",
+                      additional_kwargs={"agent_name": "FinalGeneralAgent"})
+            for m in msgs]
+    # *************
 
     return {
-        "messages": [AIMessage(content=content,
-name="FinalGeneralAgent",
-additional_kwargs={"agent_name": "FinalGeneralAgent"})],
+        "messages": msgs,
         "next": "END",
         "step": state.get("step", 0) + 1,
     }

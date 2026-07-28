@@ -154,23 +154,19 @@ def list_models() -> dict:
 
 # 구조화 출력 때마다 콘솔에 뜨는 pydantic 직렬화 경고를 지운다.
 #
-#   PydanticSerializationUnexpectedValue(Expected `none` ...
-#       [field_name='parsed', input_value=SupervisorOut(next='ActionAgent')])
+#   PydanticSerializationUnexpectedValue(Expected `none` ... [field_name='parsed'])
 #
 # 에러가 아니다. langchain_openai 가 응답을 model_dump() 할 때 openai SDK 의
 # ParsedChatCompletionMessage.parsed 가 제네릭 미지정(=None 타입)이라서 나는
-# 상위 라이브러리 잡음이다. 판정 결과(SupervisorOut)는 정상으로 파싱돼 온다.
+# 상위 라이브러리 잡음이다. 판정 결과는 정상으로 파싱돼 온다.
 # 실행에는 영향이 없는데 콘솔에서는 에러처럼 보여 원인 추적을 방해하므로
-# 이 문구만 좁게 막는다. (호출 방식을 바꿔 피하는 방법도 있지만, 게이트웨이가
-#  지금 방식으로 잘 받고 있어 프로토콜은 건드리지 않는다)
+# 이 문구만 좁게 막는다.
 warnings.filterwarnings("ignore",
                         message="Pydantic serializer warnings",
                         category=UserWarning)
 
-
-def structured_invoke(llm, schema, messages, config=None):
-    """구조화 출력 (HITL 판정용). 실패 시 예외를 그대로 올려 호출부가 폴백한다."""
-    runner = llm.with_structured_output(schema)
-    return runner.invoke(messages, config=config)
+# 구조화 출력 헬퍼는 두지 않는다. origin 이 그렇듯 호출부가
+# `llm.with_structured_output(스키마, method="json_mode")` 를 직접 쓴다.
+# (origin 선례: _node.RouteResponse)
 
 # *************  [app 전용 끝]  *************

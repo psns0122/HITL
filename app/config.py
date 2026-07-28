@@ -66,4 +66,9 @@ MAX_COLLECT = int(_get("MAX_COLLECT", "5"))       # 파라미터 재질문 상�
 MAX_VALIDATE = int(_get("MAX_VALIDATE", "3"))     # 검증 재시도 상한
 MAX_HOPS = int(_get("MAX_HOPS", "3"))             # needs-핸드오프 왕복 상한
 
+# 승인 질문 유효시간(초). 질문을 던진 지 이 시간을 넘겨 도착한 승인은
+# 내용과 무관하게 만료 처리한다 — 방치된 승인 버튼을 뒤늦게 눌러
+# 실행되는 사고 방지. (검증 시점의 설비/캐리어 상태도 이미 낡았다)
+CONFIRM_TTL_SEC = int(_get("CONFIRM_TTL_SEC", "60"))
+
 # *************  [app 전용 끝]  *************
