@@ -171,21 +171,28 @@ Router/Supervisor 를 우회하게 되어, 이 불변식과 양립할 수 없습
 들어가 Router → Supervisor 를 경유하고, 진행 중 액션이 있으면 Supervisor 가
 ActionAgent 로 보냅니다. (HITL 답변이라고 그래프 중간으로 직행하는 일은 없습니다)
 
-#### 스트림 포맷
+#### 스트림 포맷 — 정식 SSE (`text/event-stream`)
 
-최종 답변 토큰은 **가공 없는 raw text** 로 그대로 흘립니다(사내 현행 방식).
-제어 정보만 텍스트와 섞이지 않게 **`\x1e`(RS) 로 시작하는 JSON 한 줄**로 보냅니다.
+모든 것이 표준 SSE 프레임으로 나갑니다. **답변 토큰도 예외 없습니다.**
 
 ```
-✅ 반송요청명령 실행 완료          <- 그냥 텍스트 (화면에 그대로)
-\x1e{"type":"needs_input",...}\n   <- 제어 프레임
+event: token
+data: {"text": "✅ 반송요청명령 실행 완료"}
+
+event: needs_input
+data: {"type": "needs_input", "kind": "confirm", "prompt": "...", ...}
 ```
 
-`\x1e` 는 일반 텍스트에 나올 일이 없는 제어문자라 안전하게 갈라낼 수 있습니다
-(RFC 7464 JSON Text Sequences 와 같은 방식). 클라이언트 구현은 `streamlit_app.py`
-의 `stream_chat()` 를 그대로 가져다 쓰면 됩니다.
+- 프레임 = `event:` 한 줄 + `data:` 한 줄(JSON) + **빈 줄**.
+- 답변 토큰은 event 이름 `token`, 제어 정보는 `type` 값이 그대로 event 이름.
+  data JSON 안에도 `type` 이 있으므로 event 줄을 무시하고 data 만 파싱해도 됩니다.
+- 토큰 text 를 JSON 으로 감싸는 이유: SSE 의 data 줄은 개행을 못 담아서,
+  raw 로 흘리면 답변 속 개행이 프레임 경계와 섞입니다.
+- ⚠ 브라우저 내장 `EventSource` 는 GET 전용이라 이 POST 스트림에는 못 붙습니다.
+  `fetch`/`httpx` 로 받아 빈 줄 기준으로 프레임을 갈라 파싱하세요 —
+  클라이언트 구현은 `streamlit_app.py` 의 `stream_chat()` 를 그대로 가져다 쓰면 됩니다.
 
-제어 프레임 종류:
+이벤트 종류 (`token` 외에는 전부 제어 프레임):
 
 | `type` | 언제 | 내용 |
 |---|---|---|

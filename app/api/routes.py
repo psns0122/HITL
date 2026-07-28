@@ -6,17 +6,23 @@
   GET  /health      : 헬스체크
 
 
-스트림 포맷
------------
-최종 답변 토큰은 **가공 없는 raw text** 로 그대로 흘린다(사내 현행 방식).
-제어 정보(HITL 질문, 노드 트레이스, 토큰 집계)는 텍스트에 섞이면 안 되므로
-구분자 \\x1e(RS) 로 시작하는 JSON 한 줄로 보낸다.
+스트림 포맷 — 정식 SSE (text/event-stream)
+------------------------------------------
+모든 것이 표준 SSE 프레임으로 나간다. 답변 토큰도 예외 없다.
 
-    안녕하세요 반송을...        <- 그냥 텍스트
-    \\x1e{"type":"needs_input",...}\\n   <- 제어 프레임
+    event: token
+    data: {"text": "안녕하세요 반송을"}
 
-\\x1e 는 일반 텍스트에 나올 일이 없는 제어문자라 안전하게 갈라낼 수 있다.
-(RFC 7464 JSON Text Sequences 와 같은 방식)
+    event: needs_input
+    data: {"type": "needs_input", "kind": "confirm", ...}
+
+- 프레임 = `event:` 한 줄 + `data:` 한 줄(JSON) + 빈 줄.
+- 답변 토큰은 event 이름 `token`, 제어 정보는 type 값이 그대로 event 이름.
+  data JSON 안에도 type 을 남겨 두므로 이벤트 이름 없이 data 만 파싱해도 된다.
+- 토큰 text 를 JSON 으로 감싸는 이유: SSE 의 data 줄은 개행을 담을 수 없어서
+  raw 로 흘리면 답변 속 개행이 프레임 경계와 섞인다.
+- 주의: 브라우저 내장 EventSource 는 GET 전용이라 이 POST 스트림에는 못 붙는다.
+  fetch/httpx 로 받아서 빈 줄 기준으로 프레임을 갈라 파싱한다(아래 클라이언트 참고).
 
 
 HITL 판정 (턴 기반 — interrupt 없음)
@@ -55,8 +61,7 @@ from app.api.schemas import ChatRequest, ChatResponse, StopRequest
 router = APIRouter()
 
 
-# 제어 프레임 구분자 (위 docstring 참고)
-EVENT_PREFIX = "\x1e"
+# (구) \x1e 프레임은 폐기 — 정식 SSE 로 전환됐다 (위 docstring 참고)
 
 # 최종 답변 토큰을 사용자 화면으로 흘려보낼 노드
 FINAL_AGENTS = ("FinalAnswerAgent", "FinalGeneralAgent")
@@ -72,8 +77,15 @@ AGENT_NODES = list(members) + [
 
 
 def _event(payload: dict) -> str:
-    """제어 프레임 한 줄을 만든다."""
-    return EVENT_PREFIX + json.dumps(payload, ensure_ascii=False, default=str) + "\n"
+    """제어 프레임 하나를 SSE 형식으로 만든다. event 이름 = payload["type"]."""
+    data = json.dumps(payload, ensure_ascii=False, default=str)
+    return f"event: {payload.get('type', 'message')}\ndata: {data}\n\n"
+
+
+def _token(text: str) -> str:
+    """답변 토큰 하나를 SSE 형식으로 만든다."""
+    data = json.dumps({"text": text}, ensure_ascii=False)
+    return f"event: token\ndata: {data}\n\n"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -282,7 +294,7 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
                     yield _event({"type": "node_enter", "agent": node, "node": node})
                 last_recorded_node = node
 
-            # --- 최종 답변 토큰: raw text 로 그대로 흘린다
+            # --- 최종 답변 토큰: event "token" 으로 흘린다
             if event_type == "on_chat_model_stream":
                 chunk = (ev.get("data") or {}).get("chunk")
                 if not chunk:
@@ -295,7 +307,7 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
                         usage_store.append_answer(thread_id, text)
                         printed_any = True
                         print(text, end="", flush=True)
-                        yield text
+                        yield _token(text)
 
                 elif cfg.SHOW_THINKING_TOKENS:
                     # 기본 off. 켜면 중간 에이전트 토큰도 트레이스로 흐른다.
@@ -406,7 +418,7 @@ async def chat_stream(req: ChatRequest, request: Request):
 
     return StreamingResponse(
         _generate(req, flags),
-        media_type="text/plain; charset=utf-8",
+        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",

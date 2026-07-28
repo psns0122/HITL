@@ -4,11 +4,11 @@
     uvicorn app.api.main:app --reload --port 8000   # 터미널 1
     streamlit run streamlit_app.py                  # 터미널 2
 
-스트림 파싱
------------
-백엔드는 최종 답변을 raw text 로 흘리고, 제어 정보만 \\x1e 로 시작하는
-JSON 한 줄로 보낸다. 그래서 청크를 받을 때마다 \\x1e 기준으로 갈라서
-텍스트는 답변 버블에, JSON 은 트레이스/HITL 처리에 쓴다.
+스트림 파싱 — 정식 SSE
+----------------------
+백엔드는 모든 것을 SSE 프레임(`event:` + `data:` JSON + 빈 줄)으로 보낸다.
+답변 토큰은 event 이름 `token`, 나머지는 type 값이 그대로 event 이름이다.
+POST 스트림이라 브라우저 EventSource 는 못 쓰고 httpx 로 받아 직접 파싱한다.
 
 HITL 렌더링
 -----------
@@ -27,8 +27,7 @@ import app.config as cfg
 
 API = cfg.API_BASE_URL
 
-# 제어 프레임 구분자 (routes.py 의 EVENT_PREFIX 와 같아야 한다)
-EVENT_PREFIX = "\x1e"
+
 
 # 프론트 모델 선택지. 첫 번째가 기본값이다.
 MODEL_CHOICES = [
@@ -85,32 +84,29 @@ def stream_chat(query: str, model_name: str, recursion_limit: int):
 
                 buffer += raw
 
-                # 제어 프레임이 섞여 있으면 갈라낸다
-                while EVENT_PREFIX in buffer:
-                    text_part, _, rest = buffer.partition(EVENT_PREFIX)
+                # SSE 프레임은 빈 줄로 끝난다. 완성된 프레임만 하나씩 파싱한다.
+                while "\n\n" in buffer:
+                    block, buffer = buffer.split("\n\n", 1)
 
-                    if text_part:
-                        yield ("text", text_part)
+                    event_name, data_lines = "message", []
+                    for line in block.splitlines():
+                        if line.startswith("event:"):
+                            event_name = line[len("event:"):].strip()
+                        elif line.startswith("data:"):
+                            data_lines.append(line[len("data:"):].lstrip())
 
-                    # 제어 프레임은 개행으로 끝난다. 아직 안 왔으면 다음 청크를 기다린다.
-                    if "\n" not in rest:
-                        buffer = EVENT_PREFIX + rest
-                        break
+                    if not data_lines:
+                        continue
 
-                    line, _, remainder = rest.partition("\n")
                     try:
-                        yield ("event", json.loads(line))
+                        data = json.loads("\n".join(data_lines))
                     except json.JSONDecodeError:
-                        pass
-                    buffer = remainder
-                else:
-                    # 제어 프레임이 없으면 통째로 텍스트
-                    if buffer:
-                        yield ("text", buffer)
-                        buffer = ""
+                        continue
 
-    if buffer:
-        yield ("text", buffer)
+                    if event_name == "token":
+                        yield ("text", data.get("text", ""))
+                    else:
+                        yield ("event", data)
 
 
 def call_stop():

@@ -2,8 +2,8 @@
 
 사내 LLM 게이트웨이가 붙어 있어야 돈다.
 
-스트림은 최종 답변을 raw text 로 흘리고, 제어 정보만 \\x1e 로 시작하는
-JSON 한 줄로 보낸다. 아래 parse_stream 이 그걸 갈라낸다.
+스트림은 정식 SSE 다. 답변 토큰은 event "token", 제어 정보는 type 값이
+event 이름인 프레임으로 온다. 아래 stream() 이 그걸 파싱한다.
 
 실행: python3 tests/test_api_sse.py
 """
@@ -21,7 +21,6 @@ from app.api.main import app
 from tests._preflight import require_gateway
 
 BASE = "http://test/llm/api"
-EVENT_PREFIX = "\x1e"
 
 
 async def stream(client, thread_id: str, query: str, **kw) -> tuple[str, list]:
@@ -33,30 +32,32 @@ async def stream(client, thread_id: str, query: str, **kw) -> tuple[str, list]:
 
     async with client.stream("POST", f"{BASE}/chat/stream", json=payload) as r:
         assert r.status_code == 200, r.status_code
+        assert r.headers["content-type"].startswith("text/event-stream"), \
+            r.headers["content-type"]
 
         async for raw in r.aiter_text():
             buffer += raw
 
-            # 제어 프레임을 하나씩 떼어낸다
-            while EVENT_PREFIX in buffer:
-                head, _, rest = buffer.partition(EVENT_PREFIX)
-                if head:
-                    text_parts.append(head)
+            # SSE 프레임(빈 줄 종료)을 하나씩 떼어낸다
+            while "\n\n" in buffer:
+                block, buffer = buffer.split("\n\n", 1)
 
-                if "\n" not in rest:
-                    buffer = EVENT_PREFIX + rest
-                    break
+                event_name, data_lines = "message", []
+                for line in block.splitlines():
+                    if line.startswith("event:"):
+                        event_name = line[len("event:"):].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[len("data:"):].lstrip())
 
-                line, _, remainder = rest.partition("\n")
-                events.append(json.loads(line))
-                buffer = remainder
-            else:
-                if buffer:
-                    text_parts.append(buffer)
-                    buffer = ""
+                if not data_lines:
+                    continue
 
-    if buffer:
-        text_parts.append(buffer)
+                data = json.loads("\n".join(data_lines))
+
+                if event_name == "token":
+                    text_parts.append(data.get("text", ""))
+                else:
+                    events.append(data)
 
     return "".join(text_parts), events
 
