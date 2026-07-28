@@ -364,8 +364,10 @@ def send(query: str):
         # (rerun 후에는 히스토리의 마지막 턴으로서 같은 라벨·펼침으로 다시 그려진다)
         if needs:
             asker = needs.get("agent") or "에이전트"
-            # 대기 상태를 트레이스의 마지막 줄로 남긴다 (▶ Supervisor 아래)
-            trace.append(f"⏸ **사용자 입력 대기 · {asker}**")
+            # 대기 상태를 트레이스의 마지막 줄로 남긴다 — 질문 주체 노드를
+            # 진입점(▶)으로 찍고, 대기 상태는 툴과 같은 `- ` 표기로 통일
+            trace.append(f"{NODE_ICON} **{asker}**")
+            trace.append("- 사용자 입력 대기")
             redraw_trace()
             status.update(label=f"사용자 입력 대기 ⏸ · {asker}",
                           state="complete", expanded=True)

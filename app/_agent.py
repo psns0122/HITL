@@ -495,6 +495,35 @@ def classify_confirm(answer, action: str = None, params: dict = None,
         return "unclear"
 
 
+class InformativeOut(BaseModel):
+    informative: bool
+
+
+def answer_seems_informative(text: str, config=None, model_name: str = None) -> bool:
+    """ID 판독에 실패한 답변에 그래도 단서가 실려 있는지 -> True/False.
+
+    True 면 호출부가 Supervisor 상담(needs-핸드오프)으로 넘기고,
+    False 면 노이즈로 보고 재질문한다.
+    """
+    try:
+        out: InformativeOut = _llm.structured_invoke(
+            _llm.get_llm(model_name, temperature=0.0),
+            InformativeOut,
+            [
+                SystemMessage(content=_prompt.action_informative_prompt().strip()),
+                HumanMessage(content=f"사용자의 답변(원문): {text}"),
+            ],
+            config=config,
+        )
+        print(f"[AGENT] answer_seems_informative(llm) -> {out.informative}", flush=True)
+        return bool(out.informative)
+
+    except Exception as e:
+        # 추측하지 않는다 — 재질문이 가장 안전하다
+        print(f"[AGENT] answer_seems_informative llm 실패({e}) -> False (재질문)", flush=True)
+        return False
+
+
 class _ActionAgent:
     """action_node 가 가지는 판단 에이전트.
 
@@ -502,10 +531,12 @@ class _ActionAgent:
       - extract_intent            : 최초 발화 -> 의도/파라미터/참조
       - classify_collect_answer   : 파라미터 질문의 답 -> 종류 분류
       - classify_confirm          : 승인 질문의 답 -> approve/reject/unclear
+      - answer_seems_informative  : 판독 실패한 답 -> 상담 가치 유무
     """
     extract_intent = staticmethod(extract_intent)
     classify_collect_answer = staticmethod(classify_collect_answer)
     classify_confirm = staticmethod(classify_confirm)
+    answer_seems_informative = staticmethod(answer_seems_informative)
 
 
 action_agent = _ActionAgent()

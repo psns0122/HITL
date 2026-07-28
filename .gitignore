@@ -8,3 +8,6 @@ logs/
 .pytest_cache/
 *.egg-info/
 .DS_Store
+.idea/
+*.out
+tests_run.log

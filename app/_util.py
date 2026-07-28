@@ -9,6 +9,8 @@ import re
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 # *************  [app 전용 import — ActionService 가 쓴다]  *************
+import time
+
 import app.config as cfg
 from app import _prompt, _tool
 from app._state import AgentState
@@ -304,6 +306,7 @@ needs-핸드오프
             "prompt": guidance,
             "params": sc["params"],
             "options": ["승인", "거절"],
+            "asked_at": time.time(),         # 승인 TTL 기준 시각 (CONFIRM_TTL_SEC)
         }
         print(f"[ACTION ask_confirm] ⏸ 승인 질문 남기고 턴 종료\n{guidance}", flush=True)
 
@@ -510,40 +513,32 @@ needs-핸드오프
             return self._abandon(sc)
 
         # 판정 불가 — 승인/거절이 아니다. 무엇을 하려는 답인지 더 본다.
-        # ① ID 후보가 실려 있으면 '파라미터 정정' 시도 (수집한 값 보존이 최우선)
-        # ② ID 가 없으면 발화 의도를 분류한다: 취소냐 / 딴 주제의 새 질문이냐
+        # ① 발화 의도부터 분류한다: 취소냐 / 딴 주제의 새 질문(switch)이냐.
+        #    ID 가 실려 있어도 "6PDMQ283 위치 찾아줘" 같은 새 질문일 수 있다 —
+        #    ID 유무로 정정/의도를 가르면(구버전) 그런 발화를 파라미터 정정으로
+        #    오인해 캐리어를 갈아끼운다. 그래서 의도 분류가 정정 시도보다 먼저다.
+        # ② 새 질문이 아니면 ID 후보로 '파라미터 정정' 을 시도한다 (값 보존 우선)
         # ③ 둘 다 아니면 바로 접지 말고 승인 질문을 다시 던진다 (상한 있음)
+        verdict2 = _action_agent().classify_collect_answer(
+            "승인 여부", decision, sc.get("action"),
+            question="이 명령을 정말 실행할까요? (승인/거절)",
+            config=config, model_name=model_name)
+        kind = verdict2.get("kind")
+        print(f"[ACTION confirm_verdict] 판정 불가 -> 의도 분류: {kind}", flush=True)
+
+        if kind == "cancel":
+            sc["phase"] = "abandoned"
+            sc["abandon_reason"] = "사용자가 실행을 취소해 명령을 종료합니다."
+            return self._abandon(sc)
+
+        if kind == "switch":
+            # 딴 주제의 새 발화. 대기 중이던 명령은 접고(실행 전이라 안전)
+            # 그 발화를 새 질문으로 처리한다 — 안 그러면 사용자의 새 질문이
+            # '승인 확인 실패' 안내에 먹혀 답을 못 받는다.
+            return self._restart(str(decision), config)
+
+        # 새 질문이 아니다 -> 파라미터 정정 시도
         ids = _tool.params_extract_tool.invoke({"text": str(decision)}, config=config)
-        if not (ids["carrier_ids"] or ids["eqp_ids"] or ids["unknown"]):
-            verdict2 = _action_agent().classify_collect_answer(
-                "승인 여부", decision, sc.get("action"),
-                question="이 명령을 정말 실행할까요? (승인/거절)",
-                config=config, model_name=model_name)
-            kind = verdict2.get("kind")
-            print(f"[ACTION confirm_verdict] 판정 불가 -> 의도 분류: {kind}", flush=True)
-
-            if kind == "cancel":
-                sc["phase"] = "abandoned"
-                sc["abandon_reason"] = "사용자가 실행을 취소해 명령을 종료합니다."
-                return self._abandon(sc)
-
-            if kind == "switch":
-                # 딴 주제의 새 발화. 대기 중이던 명령은 접고(실행 전이라 안전)
-                # 그 발화를 새 질문으로 처리한다 — 안 그러면 사용자의 새 질문이
-                # '승인 확인 실패' 안내에 먹혀 답을 못 받는다.
-                return self._restart(str(decision), config)
-
-            # 잡담/불명 — 승인 질문을 다시 던진다. 반복되면 그때 접는다.
-            sc["confirm_retries"] = sc.get("confirm_retries", 0) + 1
-            if sc["confirm_retries"] >= cfg.MAX_VALIDATE:
-                sc["phase"] = "abandoned"
-                sc["abandon_reason"] = "승인 여부를 확인하지 못해 명령을 종료합니다."
-                print(f"[ACTION confirm_verdict] 재질문 상한 초과 -> abandon", flush=True)
-                return self._abandon(sc)
-
-            print(f"[ACTION confirm_verdict] 재질문 ({sc['confirm_retries']}/{cfg.MAX_VALIDATE})",
-                  flush=True)
-            return self._ask_confirm(sc)
 
         if ids["carrier_ids"] or ids["eqp_ids"]:
             # 조회되는 ID 를 줬다 -> 해당 파라미터만 교체하고 다시 검증·승인
@@ -552,7 +547,10 @@ needs-핸드오프
             if ids["eqp_ids"]:
                 sc["params"]["eqp_id"] = ids["eqp_ids"][0]
             print(f"[ACTION confirm_verdict] 파라미터 정정 -> params={sc['params']}", flush=True)
-        else:
+            sc["phase"] = "param_check"
+            return None
+
+        if ids["unknown"]:
             # 고치려 한 건 분명한데 조회가 안 되는 ID -> 그 자리만 비우고 다시 묻는다.
             # 어느 파라미터를 고치려는지 모를 땐 마지막 필수 파라미터로 본다
             # (transport 면 목적지 eqp_id — '바꿔줘'는 대개 목적지를 가리킨다).
@@ -561,9 +559,20 @@ needs-핸드오프
             sc["last_parse_error"] = (
                 f"'{', '.join(ids['unknown'])}' 은(는) 조회되지 않는 ID 입니다.")
             print(f"[ACTION confirm_verdict] 정정 실패 -> {target} 비우고 재수집 (unknown={ids['unknown']})", flush=True)
+            sc["phase"] = "param_check"
+            return None
 
-        sc["phase"] = "param_check"
-        return None
+        # 잡담/불명 — 승인 질문을 다시 던진다. 반복되면 그때 접는다.
+        sc["confirm_retries"] = sc.get("confirm_retries", 0) + 1
+        if sc["confirm_retries"] >= cfg.MAX_VALIDATE:
+            sc["phase"] = "abandoned"
+            sc["abandon_reason"] = "승인 여부를 확인하지 못해 명령을 종료합니다."
+            print(f"[ACTION confirm_verdict] 재질문 상한 초과 -> abandon", flush=True)
+            return self._abandon(sc)
+
+        print(f"[ACTION confirm_verdict] 재질문 ({sc['confirm_retries']}/{cfg.MAX_VALIDATE})",
+              flush=True)
+        return self._ask_confirm(sc)
 
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -604,6 +613,21 @@ needs-핸드오프
             sc.pop("awaiting", None)
 
             if awaiting["type"] == "confirm":
+                # 승인 TTL — 질문을 던진 지 CONFIRM_TTL_SEC 를 넘긴 답변은
+                # 내용과 무관하게 만료다. 방치된 승인 질문을 뒤늦게 눌러
+                # 실행되는 사고를 막는다 (판정 LLM 을 태울 것도 없이 시간 초과 —
+                # 이것은 판단이 아니라 시계다).
+                asked_at = awaiting.get("asked_at")
+                if asked_at is not None and time.time() - asked_at > cfg.CONFIRM_TTL_SEC:
+                    elapsed = time.time() - asked_at
+                    print(f"[ACTION confirm_ttl] 만료 ({elapsed:.0f}s > "
+                          f"{cfg.CONFIRM_TTL_SEC}s) -> abandon", flush=True)
+                    sc["phase"] = "abandoned"
+                    sc["abandon_reason"] = (
+                        f"승인 유효시간({cfg.CONFIRM_TTL_SEC}초)이 지나 실행하지 않았습니다. "
+                        "필요하면 명령을 다시 요청해 주세요.")
+                    return self._abandon(sc)
+
                 out = self._consume_confirm_answer(sc, answer, config, model_name=model_name)
             else:
                 out = self._consume_param_answer(sc, answer, config, model_name=model_name,
