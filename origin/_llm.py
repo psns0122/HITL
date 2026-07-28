@@ -22,7 +22,7 @@ def getmodellist(api_base, output=False, name=None, k=None):
 
     Args:
         api_base : 게이트웨이 구분자. API_BASE_TEMPLATE 에 끼워진다.
-        output   : (제공된 코드에서 사용되지 않음)
+        output   : True 면 조회된 모델 목록을 출력한다.
         name     : 이 이름이 목록에 있으면 그것을 고른다.
         k        : name 으로 못 골랐을 때 목록의 k 번째를 고른다.
 
@@ -48,6 +48,13 @@ def getmodellist(api_base, output=False, name=None, k=None):
             models = raw_data["data"]
         else:
             models = raw_data
+
+        # output=True 면 목록을 찍어 준다
+        if output:
+            print(f"[LLM] 모델 목록 {len(models)}건")
+            for i, model in enumerate(models):
+                model_id = model.get("id", model) if isinstance(model, dict) else model
+                print(f"  [{i}] {model_id}")
 
         # 1) 이름으로 찾기
         if name:

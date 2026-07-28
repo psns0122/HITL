@@ -27,11 +27,18 @@ def _get(name: str, default: str = "") -> str:
 
 
 # ── LLM 게이트웨이 (OpenAI 호환) ──────────────────────────────────────────
+# _llm.py 가 참조하는 세 값.
+#   API_BASE_TEMPLATE   : _llm 이 .format(api_base=...) 으로 채워 쓴다
+#   MODEL_LIST_ENDPOINT : 모델 목록 조회 경로 (base_url 뒤에 붙는다)
+#   api_key             : 키는 코드에 두지 않고 .env 로만 넣는다
+API_BASE_TEMPLATE = _get("API_BASE_TEMPLATE", "http://hcp.llm.skhynix.com/v1")
+MODEL_LIST_ENDPOINT = _get("MODEL_LIST_ENDPOINT", "/models")
+api_key = _get("LLM_GATEWAY_API_KEY", "")
+
 LLM_GATEWAY_BASE_URL = _get("LLM_GATEWAY_BASE_URL", "http://hcp.llm.skhynix.com/v1")
 
 # 사내 게이트웨이는 인증 키를 요구하지 않아 빈 값을 허용한다.
-# (OpenAI SDK 가 빈 키를 거부해서 _llm.py 에서 'EMPTY' 로 대체한다)
-LLM_GATEWAY_API_KEY = _get("LLM_GATEWAY_API_KEY", "")
+LLM_GATEWAY_API_KEY = api_key
 
 LLM_CHAT_MODEL = _get("LLM_CHAT_MODEL", "GaiA-LLM-Latest")
 LLM_MAX_TOKENS = int(_get("LLM_MAX_TOKENS", "4000"))
