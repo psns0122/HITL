@@ -413,8 +413,7 @@ origin/                  # ← HITL 이전 사내 원본 (비교 전용, 실행 
 ├── _node.py             #   워커 노드 = try/agent_node/except 한 틀
 ├── _util.py             #   agent_node (모든 워커가 위임하는 헬퍼)
 ├── _builder.py          #   체크포인터 없음, Supervisor 분기표에 END 없음
-├── main.py
-└── api/                 #   routes.py(save_formatted_log 원문) / schemas / graph_service
+└── api/                 #   main.py(lifespan) /                 #   routes.py(save_formatted_log 원문) / schemas / graph_service
 ```
 
 ### 에이전트별 툴

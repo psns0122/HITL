@@ -187,8 +187,8 @@ st.caption("Router → Supervisor → ExtractAgent → 워커 → FinalAnswerAge
 # 렌더 헬퍼
 # ─────────────────────────────────────────────────────────────────────────
 
-def render_trace(trace: list, expanded: bool = True):
-    """노드/툴 실행 트레이스를 접이식으로. 기본은 펼침 — 접는 건 사용자 선택.
+def render_trace(trace: list, expanded: bool = False):
+    """노드/툴 실행 트레이스를 접이식으로 (지난 턴은 접힘, 실행 중에만 펼침).
 
     카드에는 두 가지만 담는다.
       ▶ 노드   : 어느 노드에 들어갔는지
@@ -240,11 +240,13 @@ def render_usage(u: dict):
             })
 
 
-# 지난 대화 렌더
+# 지난 대화 렌더 — 지난 턴 트레이스는 접어 둔다.
+# 전부 펼쳐 두면 두세 턴만 쌓여도 화면이 트레이스로 가득 차서
+# 정작 최신 답변이 스크롤 밖으로 밀려난다.
 for turn in st.session_state.history:
     with st.chat_message(turn["role"]):
         if turn.get("trace"):
-            render_trace(turn["trace"])
+            render_trace(turn["trace"], expanded=False)
         st.markdown(turn["content"])
         render_usage(turn.get("usage"))
 
@@ -275,6 +277,7 @@ def send(query: str):
     answer = ""
     usage = None
     needs = None
+    final_agent = None    # FinalAnswerAgent / FinalGeneralAgent 중 누가 답했는지
 
     with st.chat_message("assistant"):
         status = st.status("에이전트 실행 중…", expanded=True)
@@ -304,21 +307,33 @@ def send(query: str):
                     trace.append(f"{NODE_ICON} **{ev['agent']}**")
                     redraw_trace()
                     status.update(label=f"{ev['agent']} 실행 중…", expanded=True)
+                    if ev["agent"] in ("FinalAnswerAgent", "FinalGeneralAgent"):
+                        final_agent = ev["agent"]
 
                 elif t == "tool_call":
                     # 툴 하나 = 한 줄: `- tool 입력: … → 결과: …`
-                    # ReAct 툴은 입력(on_tool_start)과 결과(on_tool_end)가 두 이벤트로
-                    # 나뉘어 오므로, 결과만 온 이벤트는 직전 같은 툴 줄에 이어 붙인다.
+                    #
+                    # ReAct 툴은 입력(on_tool_start)과 결과(on_tool_end)가
+                    # 두 프레임으로 나뉘어 온다. 결과만 온 프레임은 같은 툴의
+                    # '결과 없는 줄' 을 뒤에서부터 찾아 이어 붙인다.
+                    # 카드는 trace 리스트를 통째로 다시 그리므로(redraw_trace)
+                    # 이미 그린 줄도 제자리에서 갱신된다.
                     tool = ev.get("tool")
                     args = ev.get("args")
                     result = ev.get("result")
 
-                    if (result is not None and args is None and trace
-                            and trace[-1].startswith(f"- `{tool}`")
-                            and "→ 결과:" not in trace[-1]):
-                        trace[-1] += f" → 결과: `{_fmt_val(result)}`"
-                    else:
-                        line = f"- `{tool}`"
+                    merged = False
+                    if result is not None and args is None:
+                        for i in range(len(trace) - 1, -1, -1):
+                            if (trace[i].startswith(f"- {tool} ")
+                                    or trace[i] == f"- {tool}") \
+                                    and "→ 결과:" not in trace[i]:
+                                trace[i] += f" → 결과: `{_fmt_val(result)}`"
+                                merged = True
+                                break
+
+                    if not merged:
+                        line = f"- {tool}"
                         if args is not None:
                             line += f" 입력: `{_fmt_val(args)}`"
                         if result is not None:
@@ -343,13 +358,16 @@ def send(query: str):
             )
             return
 
-        # HITL 로 멈춘 경우: 질문을 답변 버블에 띄운다
+        # 실행이 끝나면 카드를 접는다 — 답변이 화면에 바로 보이게.
+        # (실행 중에는 펼쳐져 있고, 끝난 뒤엔 라벨 클릭으로 다시 펼 수 있다)
         if needs:
-            status.update(label="사용자 입력 대기 ⏸", state="complete", expanded=True)
+            status.update(label="사용자 입력 대기 ⏸", state="complete", expanded=False)
             answer = needs.get("prompt", "추가 입력이 필요합니다.")
             answer_box.markdown(answer)
         else:
-            status.update(label="완료", state="complete", expanded=True)
+            # Supervisor 다음에 어느 최종 에이전트가 답했는지 라벨에 남긴다
+            label = f"완료 · {final_agent}" if final_agent else "완료"
+            status.update(label=label, state="complete", expanded=False)
 
         render_usage(usage)
 
