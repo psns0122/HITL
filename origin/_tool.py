@@ -265,7 +265,7 @@ async def params_extract_tool(user_query: str, config: RunnableConfig = {}) -> D
 # ActionAgent  [원본·추정]
 #   여기만 시그니처를 받지 못했다. 사내 실물로 덮어쓸 것.
 #   원본에서는 이 툴들을 바로 부른다 — 검증도 승인도 없다.
-#   app/actions/tools.py 에서 param_check / validate / confirm / execute
+#   app/_tool.py 의 ActionAgent 섹션에서 param_check / validate / confirm / execute
 #   네 단계로 쪼개진 게 이번 작업의 결과다.
 # ─────────────────────────────────────────────────────────────────────────
 
