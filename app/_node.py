@@ -63,20 +63,16 @@ async def router_node(state: _state.AgentState, config) -> dict:
     emit(config, "agent_status", {"agent": "Router", "detail": "의도 분류 중"})
 
     # HITL 재개가 아닌 새 질의만 여기로 온다.
-    # 단, 진행 중 액션이 있으면 분류할 것도 없이 Supervisor 로 고정한다.
+    # 단, 진행 중 액션이 있으면 분류할 것도 없이 supervisor 로 고정한다.
     if (state.get("action") or {}).get("phase"):
         print("[NODE] Router: 진행 중 액션 감지 -> Supervisor 고정", flush=True)
-        return {"route": "supervisor", "handoff": False, "next": "Supervisor", "step": 1}
+        return {"route": "supervisor", "handoff": True, "next": "supervisor", "step": 1}
 
-    result = await _agent.router_agent({
-        "messages": messages,
-        "model_name": _model_of(state),
-    })
+    # 에이전트가 route / handoff / next 를 모두 채워서 준다.
+    # next 는 노드 이름이 아니라 route 값("general"/"supervisor") 그대로다.
+    result = await _agent.router_agent(state)
 
-    route = result.get("route", "supervisor")
-    next_node = "Supervisor" if route == "supervisor" else "GeneralAgent"
-
-    return {"route": route, "handoff": False, "next": next_node, "step": 1}
+    return {**result, "step": 1}
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -88,18 +84,12 @@ async def general_node(state: _state.AgentState, config) -> dict:
     print("[NODE] GeneralAgent entered", flush=True)
     emit(config, "agent_status", {"agent": "GeneralAgent", "detail": "일반 질의 처리"})
 
-    result = await _agent.general_agent({
-        "messages": state.get("messages", []) or [],
-        "model_name": _model_of(state),
-    })
+    result = await _agent.general_agent(state)
 
     # handoff=True 면 Supervisor 로, 아니면 FinalGeneralAgent 로 마무리
-    if result.get("handoff"):
-        return {"handoff": True, "route": "supervisor",
-                "next": "Supervisor", "step": state.get("step", 0) + 1}
+    next_node = "Supervisor" if result.get("handoff") else "FINISH"
 
-    return {"handoff": False, "route": "general",
-            "next": "FINISH", "step": state.get("step", 0) + 1}
+    return {**result, "next": next_node, "step": state.get("step", 0) + 1}
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -221,15 +211,6 @@ def supervisor_node(state: _state.AgentState, config) -> dict:
         emit(config, "agent_status",
              {"agent": "Supervisor", "detail": "ExtractAgent 선행 실행"})
         return {"next": "ExtractAgent", "step": step + 1}
-
-    # 3-b) Extract 게이트: 추출된 게 없으면 워커를 안 돌리고 바로 Final (항목 6)
-    #      진행 중 액션이 없을 때만. (Action 은 위 2)에서 이미 걸러졌다.)
-    extracted = (state.get("facts") or {}).get("extracted") or {}
-    if extracted and not extracted.get("gate_pass"):
-        print("[NODE] Supervisor: Extract 게이트 실패 -> FinalAnswerAgent", flush=True)
-        emit(config, "agent_status",
-             {"agent": "Supervisor", "detail": "추출 결과 없음 -> 바로 응답"})
-        return {"next": "FinalAnswerAgent", "step": step + 1}
 
     # 5) 스텝 상한 가드
     if step >= MAX_SUPERVISOR_STEPS:
@@ -392,25 +373,20 @@ def extract_node(state: _state.AgentState, config, model_name: str = None) -> di
     carriers = ids.get("carrier_ids") or []
     eqps = ids.get("eqp_ids") or []
 
-    # 게이트 판정: 이후 워커가 쓸 재료가 하나라도 있는가.
-    #   ID 가 하나라도 나왔으면 볼 것도 없이 통과.
-    #   하나도 없을 때만 LLM 에게 "그래도 워커를 돌릴 발화인가?" 를 묻는다.
-    #   (ID 없는 명령 요청 "반송 걸어줘" 는 통과시켜야 ActionAgent 가 되물을 수 있다)
-    #   통과 실패면 Supervisor 가 워커를 안 돌리고 바로 Final 로 보낸다(항목 6).
-    if carriers or eqps:
-        gate_pass = True
-    else:
-        gate_pass = _agent.classify_extract_gate(text, config=config, model_name=model)
+    # 게이트 판정은 하지 않는다.
+    #   "ID 가 없으면 워커를 돌리지 말자" 는 발상이 틀렸다 — sys_admin_tool 처럼
+    #   ID 가 아예 필요 없는 툴이 있어서, ID 유무로 워커 실행 여부를 정하면
+    #   담당자 조회·패치 계획 같은 정상 질의가 통째로 막힌다.
+    #   어느 워커로 보낼지는 원래대로 Supervisor 가 판단한다.
 
     content = (f"[ExtractAgent] fab={fab}, "
-               f"carrier_ids={carriers or '없음'}, eqp_ids={eqps or '없음'} "
-               f"(gate={'통과' if gate_pass else '실패'})")
+               f"carrier_ids={carriers or '없음'}, eqp_ids={eqps or '없음'}")
 
     return {
         "messages": [AIMessage(content=content, name="ExtractAgent")],
         # 추출 결과는 facts 에도 넣어둔다 (limiter 에 안 잘리는 공유 팩트)
         "facts": {"extracted": {"fab": fab, "carrier_ids": carriers,
-                                "eqp_ids": eqps, "gate_pass": gate_pass}},
+                                "eqp_ids": eqps}},
         "step": state.get("step", 0) + 1,
     }
 

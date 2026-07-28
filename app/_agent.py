@@ -13,20 +13,15 @@
   FinalAnswerAgent / FinalGeneralAgent : 최종 응답 생성(스트리밍)
 """
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field
 
-from app import _prompt, _tool, _util
-from app._llm import get_llm, structured_invoke
+from app import _llm, _prompt, _state, _tool, _util
 from app.actions.registry import ACTION_REGISTRY
-
-
-def _log(msg: str):
-    print(f"[AGENT] {msg}", flush=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -76,7 +71,7 @@ async def classify_route_with_llm(
         f"질문: {user_query}"
     ).strip()
 
-    llm = get_llm(model_name, temperature)
+    llm = _llm.get_llm(model_name, temperature)
     resp = await llm.ainvoke([
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),
@@ -84,7 +79,7 @@ async def classify_route_with_llm(
 
     content = _util.message_content_to_text(getattr(resp, "content", ""))
     route = _util.normalize_route_label(content)
-    _log(f"router(llm) -> {route}")
+    print(f"[AGENT] router(llm) -> {route}", flush=True)
 
     if return_raw:
         return {"query": user_query, "route": route,
@@ -95,13 +90,19 @@ async def classify_route_with_llm(
 def build_router_agent():
     """Router 노드가 호출할 함수를 만든다."""
 
-    async def _ainvoke(state: dict) -> dict:
-        messages = state.get("messages", []) or []
-        query = _util.last_user_text(messages)
+    async def _ainvoke(state: _state.AgentState) -> Dict[str, Any]:
+        query = _util.last_user_text(state)
         model_name = state.get("model_name")
 
-        route = await classify_route_with_llm(query, model_name=model_name, temperature=0.0)
-        return {"route": route}
+        route = await classify_route_with_llm(query, model_name, temperature=0.0)
+
+        # next 는 노드 이름이 아니라 route 값 그대로다.
+        # 분기표(_builder)가 "general"/"supervisor" 를 노드로 매핑한다.
+        return {
+            "route": route,
+            "handoff": route == "supervisor",
+            "next": route,
+        }
 
     return _ainvoke
 
@@ -121,22 +122,31 @@ def build_general_agent():
         MessagesPlaceholder("messages"),
     ])
 
-    async def _ainvoke(state: dict) -> dict:
-        messages = state.get("messages", []) or []
+    async def _ainvoke(state: _state.AgentState) -> Dict[str, Any]:
+        messages: List[BaseMessage] = state.get("messages", []) or []
         query = _util.last_user_text(messages)
         model_name = state.get("model_name")
 
-        # 라우터가 general 로 보냈어도 한 번 더 확인한다.
-        # 온도를 살짝 올려 첫 판단과 다른 시각으로 보게 한다.
-        route2 = await classify_route_with_llm(query, model_name=model_name, temperature=0.5)
+        # 제너럴에서도 한 번 더 세이프티 핸드오프 판단.
+        # 온도를 살짝 올려 라우터의 첫 판단과 다른 시각으로 보게 한다.
+        route2 = await classify_route_with_llm(query, model_name, temperature=0.5)
 
         if route2 == "supervisor":
-            _log("general -> supervisor handoff (업무 질의로 재판정)")
+            print("[AGENT] general -> supervisor handoff (업무 질의로 재판정)", flush=True)
             return {"handoff": True, "route": "supervisor", "messages": []}
 
-        # 일반 대화로 확정. 실제 답변 생성은 FinalGeneralAgent 가 스트리밍으로 한다.
-        _log("general -> FINISH (일반 대화 확정)")
-        return {"handoff": False, "route": "general", "messages": []}
+        # 일반 대화로 확정 -> 여기서 답변을 만든다.
+        llm = _llm.get_llm(model_name, temperature=0.0)
+        chain = prompt | llm
+        resp = await chain.ainvoke({"messages": messages})
+
+        print("[AGENT] general -> FINISH (일반 대화 확정)", flush=True)
+        return {
+            "handoff": False,
+            "route": "general",
+            "messages": [AIMessage(content=_util.message_content_to_text(resp.content),
+                                   name="GeneralAgent")],
+        }
 
     return _ainvoke
 
@@ -152,7 +162,7 @@ general_agent = build_general_agent()
 def create_general_agent(model_name: str = None):
     """일반 대화 + 사내 문서 RAG."""
     return create_react_agent(
-        model=get_llm(model_name, temperature=0.2),
+        model=_llm.get_llm(model_name, temperature=0.2),
         tools=disable_tool_caching([
             _tool.general_tool,
             _tool.amhs_rag_tool,
@@ -164,7 +174,7 @@ def create_general_agent(model_name: str = None):
 def create_status_agent(model_name: str = None):
     """큐/서버/설비/패치 상태 조회."""
     return create_react_agent(
-        model=get_llm(model_name, temperature=0.2),
+        model=_llm.get_llm(model_name, temperature=0.2),
         tools=disable_tool_caching([
             _tool.queue_status_tool,
             _tool.server_status_tool,
@@ -179,7 +189,7 @@ def create_status_agent(model_name: str = None):
 def create_location_agent(model_name: str = None):
     """캐리어 위치 조회."""
     return create_react_agent(
-        model=get_llm(model_name, temperature=0.2),
+        model=_llm.get_llm(model_name, temperature=0.2),
         tools=disable_tool_caching([
             _tool.location_search_tool,
         ]),
@@ -190,7 +200,7 @@ def create_location_agent(model_name: str = None):
 def create_log_agent(model_name: str = None):
     """반송 이력·에러 로그 분석."""
     return create_react_agent(
-        model=get_llm(model_name, temperature=0.2),
+        model=_llm.get_llm(model_name, temperature=0.2),
         tools=disable_tool_caching([
             _tool.log_search_tool,
         ]),
@@ -205,41 +215,13 @@ def create_extract_agent(model_name: str = None):
     다른 모든 워커에 선행한다. 뒤 단계가 쓸 ID 재료를 만드는 역할이다.
     """
     return create_react_agent(
-        model=get_llm(model_name, temperature=0.2),
+        model=_llm.get_llm(model_name, temperature=0.2),
         tools=disable_tool_caching([
             _tool.fab_extract_tool,
             _tool.params_extract_tool,
         ]),
         prompt=_prompt.extract_agent_prompt().strip(),
     )
-
-
-class ExtractGateOut(BaseModel):
-    pass_gate: bool = Field(True, description="뒤 워커를 돌릴 가치가 있으면 true")
-
-
-def classify_extract_gate(text: str, config=None, model_name: str = None) -> bool:
-    """ID 가 하나도 안 나왔을 때, 그래도 워커를 돌릴지 LLM 이 판단한다.
-
-    실패 시 True 로 폴백한다. 워커를 헛돌리는 쪽이 필요한 조회를
-    통째로 건너뛰는 쪽보다 안전하다.
-    """
-    try:
-        out = structured_invoke(
-            get_llm(model_name, temperature=0.0),
-            ExtractGateOut,
-            [
-                SystemMessage(content=_prompt.extract_gate_prompt().strip()),
-                HumanMessage(content=f"발화: {text}"),
-            ],
-            config=config,
-        )
-        _log(f"extract gate(llm) -> {out.pass_gate}")
-        return bool(out.pass_gate)
-
-    except Exception as e:
-        _log(f"extract gate llm 실패({e}) -> 통과 폴백")
-        return True
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -257,8 +239,8 @@ def supervisor_agent(text: str, members: list, config=None, model_name: str = No
     supervisor_node 가 먼저 처리하고, 여기는 그 뒤에만 불린다.
     """
     try:
-        out = structured_invoke(
-            get_llm(model_name, temperature=0.0),
+        out = _llm.structured_invoke(
+            _llm.get_llm(model_name, temperature=0.0),
             SupervisorOut,
             [
                 SystemMessage(content=_prompt.supervisor_agent_prompt(members).strip()),
@@ -268,11 +250,11 @@ def supervisor_agent(text: str, members: list, config=None, model_name: str = No
         )
         allowed = members + ["FinalAnswerAgent"]
         nxt = out.next if out.next in allowed else "FinalAnswerAgent"
-        _log(f"supervisor(llm) -> {nxt}")
+        print(f"[AGENT] supervisor(llm) -> {nxt}", flush=True)
         return nxt
 
     except Exception as e:
-        _log(f"supervisor llm 실패({e}) -> FinalAnswerAgent 폴백")
+        print(f"[AGENT] supervisor llm 실패({e}) -> FinalAnswerAgent 폴백", flush=True)
         return "FinalAnswerAgent"
 
 
@@ -308,8 +290,8 @@ def needs_dispatch(needs: dict, members: list, config=None,
     answer = str(needs.get("answer") or "")
 
     try:
-        out: DispatchOut = structured_invoke(
-            get_llm(model_name, temperature=0.0),
+        out: DispatchOut = _llm.structured_invoke(
+            _llm.get_llm(model_name, temperature=0.0),
             DispatchOut,
             [
                 SystemMessage(content=_prompt.needs_dispatch_prompt(members).strip()),
@@ -324,11 +306,11 @@ def needs_dispatch(needs: dict, members: list, config=None,
         )
         agent = out.agent if out.agent in members else None
         query = out.query or (answer if agent else None)
-        _log(f"needs_dispatch(llm) -> {agent} query='{query}'")
+        print(f"[AGENT] needs_dispatch(llm) -> {agent} query='{query}'", flush=True)
         return {"agent": agent, "query": query}
 
     except Exception as e:
-        _log(f"needs_dispatch llm 실패({e}) -> NONE (사용자에게 직접 질문)")
+        print(f"[AGENT] needs_dispatch llm 실패({e}) -> NONE (사용자에게 직접 질문)", flush=True)
         return {"agent": None, "query": None}
 
 
@@ -368,8 +350,8 @@ def extract_intent(text: str, config=None, model_name: str = None) -> IntentResu
             for s in ACTION_REGISTRY.values()
         )
 
-        out: IntentOut = structured_invoke(
-            get_llm(model_name, temperature=0.0),
+        out: IntentOut = _llm.structured_invoke(
+            _llm.get_llm(model_name, temperature=0.0),
             IntentOut,
             [
                 SystemMessage(content=_prompt.action_agent_prompt().strip()),
@@ -399,11 +381,11 @@ def extract_intent(text: str, config=None, model_name: str = None) -> IntentResu
             ),
             cancel=out.cancel,
         )
-        _log(f"extract_intent(llm) -> {r}")
+        print(f"[AGENT] extract_intent(llm) -> {r}", flush=True)
         return r
 
     except Exception as e:
-        _log(f"extract_intent llm 실패({e}) -> 빈 결과 (사용자에게 물어본다)")
+        print(f"[AGENT] extract_intent llm 실패({e}) -> 빈 결과 (사용자에게 물어본다)", flush=True)
         return IntentResult()
 
 
@@ -438,8 +420,8 @@ def classify_collect_answer(fieldname: str, answer, current_action: str | None,
         return {"kind": "cancel"}
 
     try:
-        out: CollectAnswerOut = structured_invoke(
-            get_llm(model_name, temperature=0.0),
+        out: CollectAnswerOut = _llm.structured_invoke(
+            _llm.get_llm(model_name, temperature=0.0),
             CollectAnswerOut,
             [
                 SystemMessage(content=_prompt.action_collect_answer_prompt().strip()),
@@ -452,7 +434,7 @@ def classify_collect_answer(fieldname: str, answer, current_action: str | None,
             ],
             config=config,
         )
-        _log(f"classify_collect_answer(llm) -> {out.kind}")
+        print(f"[AGENT] classify_collect_answer(llm) -> {out.kind}", flush=True)
 
         if out.kind == "cancel":
             return {"kind": "cancel"}
@@ -471,7 +453,7 @@ def classify_collect_answer(fieldname: str, answer, current_action: str | None,
 
     except Exception as e:
         # 추측하지 않는다 — 다시 묻는 게 가장 안전하다
-        _log(f"classify_collect_answer llm 실패({e}) -> 재질문")
+        print(f"[AGENT] classify_collect_answer llm 실패({e}) -> 재질문", flush=True)
         return {"kind": "empty", "note": "답변을 이해하지 못했습니다. 다시 알려주세요."}
 
 
@@ -494,8 +476,8 @@ def classify_confirm(answer, action: str = None, params: dict = None,
             return "approve" if answer["approved"] else "reject"
 
     try:
-        out: ConfirmOut = structured_invoke(
-            get_llm(model_name, temperature=0.0),
+        out: ConfirmOut = _llm.structured_invoke(
+            _llm.get_llm(model_name, temperature=0.0),
             ConfirmOut,
             [
                 SystemMessage(content=_prompt.action_confirm_prompt().strip()),
@@ -506,12 +488,12 @@ def classify_confirm(answer, action: str = None, params: dict = None,
             ],
             config=config,
         )
-        _log(f"classify_confirm(llm) -> {out.verdict}")
+        print(f"[AGENT] classify_confirm(llm) -> {out.verdict}", flush=True)
         return out.verdict
 
     except Exception as e:
         # 실행은 위험하다 — 판정 못 하면 절대 승인하지 않는다
-        _log(f"classify_confirm llm 실패({e}) -> unclear (미승인)")
+        print(f"[AGENT] classify_confirm llm 실패({e}) -> unclear (미승인)", flush=True)
         return "unclear"
 
 
@@ -569,7 +551,7 @@ def _build_final_chain(system_prompt: str, model_name: str = None):
         ("system", system_prompt),
         MessagesPlaceholder("messages"),
     ])
-    return prompt | get_llm(model_name, temperature=0.2)
+    return prompt | _llm.get_llm(model_name, temperature=0.2)
 
 
 async def _astream_final(chain, messages: list, config) -> str:
@@ -607,12 +589,12 @@ def _make_final_agent(system_prompt: str, role: str, model_name: str = None):
 
         # 3) 비었으면 1회 재시도
         if not text.strip():
-            _log(f"{role}: 빈 응답 -> 1회 재시도")
+            print(f"[AGENT] {role}: 빈 응답 -> 1회 재시도", flush=True)
             text = await _astream_final(chain, messages, config)
 
         # 4) 그래도 비었으면 폴백 문구
         if not text.strip():
-            _log(f"{role}: 재시도도 실패 -> 폴백 문구")
+            print(f"[AGENT] {role}: 재시도도 실패 -> 폴백 문구", flush=True)
             return FALLBACK_TEXT
 
         return text

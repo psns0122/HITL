@@ -217,56 +217,37 @@ async def action_node(state: _state.AgentState) -> _state.AgentState:
 # Router / GeneralAgent
 # ─────────────────────────────────────────────────────────────────────────
 
-class RouterResponse(TypedDict):
-    route: Annotated[Literal["general", "supervisor"], "질의 종류"]
-
-
 async def router_node(state: _state.AgentState) -> _state.AgentState:
     """일반 질의면 GeneralAgent, 업무 질의면 Supervisor 로 보낸다.
 
-    판단이 안 되면 supervisor 로 보낸다 — 조회를 놓치는 것보다
-    불필요하게 조회하는 편이 낫다.
+    이 노드는 판단하지 않는다. _agent.router_agent 가 route / handoff / next
+    를 다 채워서 주고, 여기서는 step 만 얹는다.
+    next 에는 노드 이름이 아니라 route 값("general"/"supervisor")이 들어간다.
     """
     print("[NODE] Router entered")
 
-    route = "supervisor"
-
     try:
-        chain = _llm.get_llm(
-            model_name=state.get("model_name"), temperature=0
-        ).with_structured_output(RouterResponse, method="json_mode")
-
-        response = await chain.ainvoke([
-            ("system", _prompt.router_agent_prompt()),
-            ("human", _util.last_human_text(state.get("messages", []))),
-        ])
-
-        if isinstance(response, dict) and response.get("route") == "general":
-            route = "general"
+        result = await _agent.router_agent(state)
+        return {**result, "step": 1}
 
     except Exception as e:
-        print(f"[ERROR] Router LLM invoke failed: {e}")
-
-    next_node = "Supervisor" if route == "supervisor" else "GeneralAgent"
-    print(f"[NODE] Router -> {next_node}")
-
-    return {
-        "route": route,
-        "handoff": False,
-        "next": next_node,
-        "step": 1,
-    }
+        # 판단이 안 되면 supervisor 로 보낸다 — 조회를 놓치는 것보다
+        # 불필요하게 조회하는 편이 낫다.
+        print(f"[ERROR] Failed to execute Router: {e}")
+        return {"route": "supervisor", "handoff": True, "next": "supervisor", "step": 1}
 
 
 async def general_node(state: _state.AgentState) -> _state.AgentState:
-    """일반 대화. 업무 질의로 재판정되면 Supervisor 로 handoff 한다."""
-    try:
-        agent = _agent.create_general_agent(model_name=state.get("model_name"))
-        result = await _util.agent_node(state, agent, "GeneralAgent")
+    """일반 대화. 업무 질의로 재판정되면 Supervisor 로 handoff 한다.
 
-        result["handoff"] = False
-        result["next"] = "FINISH"
-        return result
+    GeneralAgent 는 react agent 가 아니라서 _util.agent_node 를 쓰지 않는다.
+    (_agent.build_general_agent 가 만든 함수를 직접 부른다)
+    """
+    try:
+        result = await _agent.general_agent(state)
+
+        next_node = "Supervisor" if result.get("handoff") else "FINISH"
+        return {**result, "next": next_node, "step": state.get("step", 0) + 1}
 
     except Exception as e:
         print(f"[ERROR] Failed to execute GeneralAgent: {e}")

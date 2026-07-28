@@ -59,8 +59,15 @@ def message_content_to_text(content) -> str:
     return str(content)
 
 
-def last_user_text(messages: list) -> str:
-    """가장 최근 사용자 발화. 없으면 빈 문자열."""
+def last_user_text(source) -> str:
+    """가장 최근 사용자 발화. 없으면 빈 문자열.
+
+    호출부가 messages 리스트를 주기도 하고 state 를 통째로 주기도 한다
+    (사내 코드에서 Router 는 state, GeneralAgent 는 messages 를 넘긴다).
+    둘 다 받는다.
+    """
+    messages = source.get("messages", []) if isinstance(source, dict) else source
+
     for msg in reversed(messages or []):
         if isinstance(msg, HumanMessage):
             return message_content_to_text(msg.content)
