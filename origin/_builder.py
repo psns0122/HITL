@@ -26,18 +26,11 @@ from langgraph.graph import END, START, StateGraph
 
 from origin import _node, _state
 
-# ── 프로세스 공용 체크포인터 ──────────────────────────────────────────────
-# HITL 진행 상태가 아니라 '대화 맥락' 이 여기 달려 있다. 채팅 세션 하나가
-# thread_id 하나이고, 그 스레드의 messages 를 체크포인터가 들고 있다.
-SHARED_CHECKPOINTER = MemorySaver()
-
-
 def build_team_graph(checkpointer=None):
     """그래프와 체크포인터를 만들어 돌려준다.
 
     Args:
-        checkpointer: 쓸 체크포인터. None 이면 프로세스 공용 것을 쓴다.
-                      테스트에서 스레드 상태를 격리하고 싶을 때만 따로 넘긴다.
+        checkpointer: 쓸 체크포인터. None 이면 새 MemorySaver 를 만든다.
 
     모델명은 받지 않는다. 노드가 실행 시점에 state["model_name"] 을 읽는다.
     """
@@ -88,7 +81,7 @@ def build_team_graph(checkpointer=None):
     workflow.add_edge("FinalAnswerAgent", END)
     workflow.add_edge("FinalGeneralAgent", END)
 
-    checkpointer = checkpointer or SHARED_CHECKPOINTER
+    checkpointer = checkpointer or MemorySaver()
     graph = workflow.compile(checkpointer=checkpointer)
 
     return graph, checkpointer
