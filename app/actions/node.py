@@ -61,10 +61,6 @@ ACTIVE_PHASES = {"param_check", "collecting", "awaiting_helper", "validating", "
 MAX_LOOP_TURNS = 40
 
 
-def _log(step: str, msg: str):
-    print(f"[ACTION {step}] {msg}", flush=True)
-
-
 def _read_ids(text: str, config) -> dict:
     """ID 판독기(공용 툴) 호출. 발화에서 캐리어/장비 ID 를 인식한다.
 
@@ -107,7 +103,7 @@ def _ask_param(sc: dict) -> dict:
         "params": sc.get("params", {}),
         "missing": sc.get("missing", []),
     }
-    _log("ask_param", f"⏸ 질문 남기고 턴 종료 field={fieldname}")
+    print(f"[ACTION ask_param] ⏸ 질문 남기고 턴 종료 field={fieldname}", flush=True)
 
     return {
         "action": sc,
@@ -130,7 +126,7 @@ def _ask_confirm(sc: dict) -> dict:
         "params": sc["params"],
         "options": ["승인", "거절"],
     }
-    _log("ask_confirm", f"⏸ 승인 질문 남기고 턴 종료\n{guidance}")
+    print(f"[ACTION ask_confirm] ⏸ 승인 질문 남기고 턴 종료\n{guidance}", flush=True)
 
     return {
         "action": sc,
@@ -141,7 +137,7 @@ def _ask_confirm(sc: dict) -> dict:
 
 def _needs_exit(sc: dict, config) -> dict:
     """Supervisor 에게 상담하러 정상 종료 (interrupt 아님)."""
-    _log("needs_exit", f"Supervisor 에 상담 -> needs={sc.get('needs')}")
+    print(f"[ACTION needs_exit] Supervisor 에 상담 -> needs={sc.get('needs')}", flush=True)
     emit(config, "agent_status",
          {"agent": "ActionAgent",
           "detail": f"{sc['needs']['fill']} 값을 사용자 답변에서 못 읽음 "
@@ -152,7 +148,7 @@ def _needs_exit(sc: dict, config) -> dict:
 def _execute_and_finalize(sc: dict, config) -> dict:
     """진짜 액션 수행 — 명시적 승인 이후에만 도달하는 유일한 side-effect 지점."""
     spec = ACTION_REGISTRY[sc["action"]]
-    _log("execute", f"enter action={sc['action']} params={sc['params']}")
+    print(f"[ACTION execute] enter action={sc['action']} params={sc['params']}", flush=True)
     result = spec.execute(sc["params"])
     sc["result"] = result
     emit(config, "tool_call", {"agent": "ActionAgent", "tool": f"{sc['action']}_execute_tool",
@@ -164,7 +160,7 @@ def _execute_and_finalize(sc: dict, config) -> dict:
              f"- Job ID: {res.get('job_id')}",
              f"- 상태: {res.get('status')}"]
     lines += [f"- {k}: {v}" for k, v in payload.items()]
-    _log("finalize", f"job={res.get('job_id')}")
+    print(f"[ACTION finalize] job={res.get('job_id')}", flush=True)
 
     return {
         "messages": [AIMessage(content="\n".join(lines), name="ActionAgent")],
@@ -179,7 +175,7 @@ def _abandon(sc: dict) -> dict:
     """취소/거절/한도초과 종료: 안내 메시지 + 스크래치 리셋. 재시도 집착 금지."""
     reason = sc.get("abandon_reason") or "요청을 종료했습니다."
     label = ACTION_REGISTRY[sc["action"]].label if sc.get("action") in ACTION_REGISTRY else "명령"
-    _log("abandon", reason)
+    print(f"[ACTION abandon] {reason}", flush=True)
     return {
         "messages": [AIMessage(content=f"🚫 {label} 을(를) 실행하지 않았습니다.\n- 사유: {reason}",
                                name="ActionAgent")],
@@ -196,7 +192,7 @@ def _restart(text: str, config) -> dict:
     사람들은 수집 도중에도 맥락을 벗어난 새 질문을 던진다. 그 발화를 새
     HumanMessage 로 넣어 Supervisor 부터(ExtractAgent 선행 포함) 다시 태운다.
     """
-    _log("restart", f"새 질문으로 재시작: '{text}'")
+    print(f"[ACTION restart] 새 질문으로 재시작: '{text}'", flush=True)
     emit(config, "agent_status",
          {"agent": "ActionAgent", "detail": "이전 작업 중단, 새 질문 처리"})
     return {
@@ -219,7 +215,7 @@ def _consume_param_answer(sc: dict, answer, config, model_name=None, question=No
       노드는 그 결과에 따라 흐름만 잡는다. (규칙은 FAKE 모드/폴백 전용)
     """
     fieldname = sc.get("pending_field")
-    _log("merge_param", f"enter field={fieldname}")
+    print(f"[ACTION merge_param] enter field={fieldname}", flush=True)
 
     r = action_agent.classify_collect_answer(
         fieldname, answer, sc.get("action"),
@@ -228,24 +224,24 @@ def _consume_param_answer(sc: dict, answer, config, model_name=None, question=No
     # 취소
     if r["kind"] == "cancel":
         sc["abandon_reason"] = "사용자 요청으로 명령을 취소했습니다."
-        _log("merge_param", "취소 -> abandon")
+        print(f"[ACTION merge_param] 취소 -> abandon", flush=True)
         return _abandon(sc)
 
     # 맥락 이탈 — 진행 중 액션을 접고 새 질문으로 재시작
     if r["kind"] == "switch":
-        _log("merge_param", f"맥락 이탈 -> 재시작: '{r['text']}'")
+        print(f"[ACTION merge_param] 맥락 이탈 -> 재시작: '{r['text']}'", flush=True)
         return _restart(r["text"], config)
 
     # 상담형 -> 답변 원문을 들고 수집 루프가 Supervisor 상담을 요청한다
     if r["kind"] == "consult":
         sc["consult_text"] = r["text"]
-        _log("merge_param", f"상담형 답변 -> '{r['text']}'")
+        print(f"[ACTION merge_param] 상담형 답변 -> '{r['text']}'", flush=True)
         return None
 
     # 액션 선택 (action 을 묻던 중)
     if r["kind"] == "action":
         sc["action"] = r["value"]
-        _log("merge_param", f"액션 선택 -> {r['value']}")
+        print(f"[ACTION merge_param] 액션 선택 -> {r['value']}", flush=True)
         return None
 
     # 값 후보 -> ID 판독기 툴로 실제 인식·검증
@@ -260,7 +256,7 @@ def _consume_param_answer(sc: dict, answer, config, model_name=None, question=No
                 sc["params"]["carrier_id"] = ids["carrier_ids"][0]
             if ids["eqp_ids"] and not sc["params"].get("eqp_id"):
                 sc["params"]["eqp_id"] = ids["eqp_ids"][0]
-            _log("merge_param", f"값 인식 -> params={sc['params']}")
+            print(f"[ACTION merge_param] 값 인식 -> params={sc['params']}", flush=True)
             return None
 
         # 묻는 종류의 값은 없는데 '다른 종류'의 ID 가 실려 있다
@@ -268,7 +264,7 @@ def _consume_param_answer(sc: dict, answer, config, model_name=None, question=No
         # 값을 간접적으로 준 것일 수 있으니 답변 원문을 들고 Supervisor 상담.
         if ids["carrier_ids"] or ids["eqp_ids"]:
             sc["consult_text"] = r["text"]
-            _log("merge_param", f"다른 종류 ID 감지 -> Supervisor 상담: '{r['text']}'")
+            print(f"[ACTION merge_param] 다른 종류 ID 감지 -> Supervisor 상담: '{r['text']}'", flush=True)
             return None
 
         # ID 스러운 토큰이 있었는데 조회에 안 걸림 -> 그 토큰을 짚어 재질문.
@@ -277,8 +273,8 @@ def _consume_param_answer(sc: dict, answer, config, model_name=None, question=No
             sc["collect_retries"] = sc.get("collect_retries", 0) + 1
             sc["last_parse_error"] = (
                 f"'{', '.join(ids['unknown'])}' 은(는) 조회되지 않는 ID 입니다.")
-            _log("merge_param", f"미조회 ID 재질문(재시도 {sc['collect_retries']}): "
-                                f"{ids['unknown']}")
+            print(f"[ACTION merge_param] 미조회 ID 재질문(재시도 "
+                  f"{sc['collect_retries']}): {ids['unknown']}", flush=True)
             return None
 
         # ID 판독과 무관한 답변인데 정보가 실린 것 같다 -> Supervisor 상담.
@@ -288,19 +284,19 @@ def _consume_param_answer(sc: dict, answer, config, model_name=None, question=No
         if action_agent.answer_seems_informative(r["text"], config=config,
                                                  model_name=model_name):
             sc["consult_text"] = r["text"]
-            _log("merge_param", f"판독 불가·정보성 답변 -> Supervisor 상담: '{r['text']}'")
+            print(f"[ACTION merge_param] 판독 불가·정보성 답변 -> Supervisor 상담: '{r['text']}'", flush=True)
             return None
 
         # 진짜 노이즈 ("음...", "ㅋㅋ") -> 그냥 재질문
         sc["collect_retries"] = sc.get("collect_retries", 0) + 1
         sc["last_parse_error"] = f"입력하신 값에서 {fieldname} 를 찾지 못했습니다."
-        _log("merge_param", f"값 인식 실패(재시도 {sc['collect_retries']})")
+        print(f"[ACTION merge_param] 값 인식 실패(재시도 {sc['collect_retries']})", flush=True)
         return None
 
     # empty
     sc["collect_retries"] = sc.get("collect_retries", 0) + 1
     sc["last_parse_error"] = r.get("note", "")
-    _log("merge_param", f"재질문({sc['collect_retries']}): {r.get('note')}")
+    print(f"[ACTION merge_param] 재질문({sc['collect_retries']}): {r.get('note')}", flush=True)
     return None
 
 
@@ -314,7 +310,7 @@ def _consume_confirm_answer(sc: dict, decision, config, model_name=None):
     verdict = action_agent.classify_confirm(
         decision, action=sc.get("action"), params=sc.get("params"),
         config=config, model_name=model_name)
-    _log("confirm_verdict", f"decision={decision!r} -> {verdict}")
+    print(f"[ACTION confirm_verdict] decision={decision!r} -> {verdict}", flush=True)
     sc["confirm"] = verdict
 
     # 승인 — 유일하게 execute 로 가는 길
@@ -335,7 +331,7 @@ def _consume_confirm_answer(sc: dict, decision, config, model_name=None):
     if not cands:
         sc["phase"] = "abandoned"
         sc["abandon_reason"] = "승인 여부를 확인하지 못해 명령을 종료합니다."
-        _log("confirm_verdict", "판정 불가 + ID 후보 없음 -> abandon")
+        print(f"[ACTION confirm_verdict] 판정 불가 + ID 후보 없음 -> abandon", flush=True)
         return _abandon(sc)
 
     ids = id_lookup_tool(cands)
@@ -349,7 +345,7 @@ def _consume_confirm_answer(sc: dict, decision, config, model_name=None):
             sc["params"]["carrier_id"] = ids["carrier_ids"][0]
         if ids["eqp_ids"]:
             sc["params"]["eqp_id"] = ids["eqp_ids"][0]
-        _log("confirm_verdict", f"파라미터 정정 -> params={sc['params']}")
+        print(f"[ACTION confirm_verdict] 파라미터 정정 -> params={sc['params']}", flush=True)
     else:
         # 고치려 한 건 분명한데 조회가 안 되는 ID -> 그 자리만 비우고 다시 묻는다.
         # 어느 파라미터를 고치려는지 모를 땐 마지막 필수 파라미터로 본다
@@ -359,7 +355,7 @@ def _consume_confirm_answer(sc: dict, decision, config, model_name=None):
         sc["params"].pop(target, None)
         sc["last_parse_error"] = (
             f"'{', '.join(ids['unknown'])}' 은(는) 조회되지 않는 ID 입니다.")
-        _log("confirm_verdict", f"정정 실패 -> {target} 비우고 재수집 (unknown={ids['unknown']})")
+        print(f"[ACTION confirm_verdict] 정정 실패 -> {target} 비우고 재수집 (unknown={ids['unknown']})", flush=True)
 
     sc["phase"] = "param_check"
     return None
@@ -390,14 +386,14 @@ def action_node(state: AgentState, config) -> dict:
     #   4) 그 외                    -> 의도 추론 (신규 액션)
 
     if sc.get("needs"):
-        _log("entry", "needs 복귀 -> param_check")
+        print(f"[ACTION entry] needs 복귀 -> param_check", flush=True)
         emit(config, "agent_status", {"agent": "ActionAgent", "detail": "헬퍼 결과 회수"})
 
     elif awaiting and msgs and isinstance(msgs[-1], HumanMessage):
         # 질문을 던져놓고 기다리던 중 + 새 턴으로 들어온 HITL 답변
         # (Router/Supervisor 를 거쳐 왔다)
         answer = last_human_text(msgs)
-        _log("entry", f"HITL 답변 수신({awaiting['type']}): {answer!r}")
+        print(f"[ACTION entry] HITL 답변 수신({awaiting['type']}): {answer!r}", flush=True)
         emit(config, "agent_status",
              {"agent": "ActionAgent", "detail": f"사용자 응답 수신({awaiting['type']})"})
         sc.pop("awaiting", None)
@@ -413,15 +409,15 @@ def action_node(state: AgentState, config) -> dict:
 
     elif sc.get("phase") in ACTIVE_PHASES:
         # 진행 중 스크래치 (awaiting 인데 새 발화가 없으면 질문을 다시 조립한다)
-        _log("entry", f"재진입 (phase={sc.get('phase')})")
+        print(f"[ACTION entry] 재진입 (phase={sc.get('phase')})", flush=True)
         emit(config, "agent_status", {"agent": "ActionAgent", "detail": "재진입(수집 재개)"})
         sc.pop("awaiting", None)
 
     else:
         # 신규 진입 -> 의도/파라미터/참조 추출
         text = last_human_text(msgs)
-        _log("entry", "신규 진입")
-        _log("infer_intent", f"enter text='{text}'")
+        print(f"[ACTION entry] 신규 진입", flush=True)
+        print(f"[ACTION infer_intent] enter text='{text}'", flush=True)
         emit(config, "agent_status", {"agent": "ActionAgent", "detail": "신규 진입"})
         r = action_agent.extract_intent(text, config=config, model_name=model_name)
         sc = {
@@ -436,8 +432,8 @@ def action_node(state: AgentState, config) -> dict:
             "validate_retries": 0,
             "hops": 0,
         }
-        _log("infer_intent", f"-> action={r.action} params={sc['params']} "
-                             f"consult={bool(r.reference)}")
+        print(f"[ACTION infer_intent] -> action={r.action} params={sc['params']} "
+              f"consult={bool(r.reference)}", flush=True)
 
     # ── 수집/검증 루프 (구 param_check <-> validate) ────────────────────
     for _ in range(MAX_LOOP_TURNS):
@@ -464,15 +460,15 @@ def action_node(state: AgentState, config) -> dict:
 
             if value:
                 sc["params"][needs["fill"]] = value.upper()
-                _log("param_check", f"헬퍼({res.get('by')}) 답변에서 판독: "
-                                    f"{needs['fill']}={value}")
+                print(f"[ACTION param_check] 헬퍼({res.get('by')}) 답변에서 판독: "
+                      f"{needs['fill']}={value}", flush=True)
             else:
                 # 헬퍼가 없거나, 답변에서 값을 못 읽음 -> 사용자에게 직접(HITL 강등).
                 # 상담도 재질문 한 번으로 세어 MAX_COLLECT 안에서 수렴하게 한다.
                 sc["collect_retries"] = sc.get("collect_retries", 0) + 1
                 sc["last_parse_error"] = res.get("note") or \
                     f"{res.get('by', '동료 에이전트')} 답변에서 값을 찾지 못했습니다. 직접 입력해 주세요."
-                _log("param_check", f"헬퍼 실패 -> HITL 강등: {sc['last_parse_error']}")
+                print(f"[ACTION param_check] 헬퍼 실패 -> HITL 강등: {sc['last_parse_error']}", flush=True)
 
         # 1) 필수 파라미터 충족 검사
         check = param_check_tool(sc.get("action"), sc.get("params", {}))
@@ -491,7 +487,7 @@ def action_node(state: AgentState, config) -> dict:
         consult = sc.get("consult_text")
         if consult and sc["missing"]:
             if sc.get("hops", 0) >= cfg.MAX_HOPS:
-                _log("param_check", f"MAX_HOPS({cfg.MAX_HOPS}) 초과 -> 상담 포기, 직접 질문")
+                print(f"[ACTION param_check] MAX_HOPS({cfg.MAX_HOPS}) 초과 -> 상담 포기, 직접 질문", flush=True)
                 sc.pop("consult_text", None)
             else:
                 fill = sc["missing"][0]
@@ -503,25 +499,25 @@ def action_node(state: AgentState, config) -> dict:
                                "answer": sc.pop("consult_text"),
                                "params": dict(sc.get("params") or {})}
                 sc["phase"] = "awaiting_helper"
-                _log("param_check", f"Supervisor 상담 요청: fill={fill} "
-                                    f"answer='{sc['needs']['answer']}'")
+                print(f"[ACTION param_check] Supervisor 상담 요청: fill={fill} "
+                      f"answer='{sc['needs']['answer']}'", flush=True)
                 return _needs_exit(sc, config)
 
         # 3) 미충족 → 수집 (한 번에 한 파라미터씩 질문하고 턴 종료)
         if sc["missing"]:
             if sc.get("collect_retries", 0) >= cfg.MAX_COLLECT:
                 sc["abandon_reason"] = "필수 파라미터를 수집하지 못해 요청을 종료합니다."
-                _log("param_check", "MAX_COLLECT 초과 -> abandon")
+                print(f"[ACTION param_check] MAX_COLLECT 초과 -> abandon", flush=True)
                 return _abandon(sc)
             sc["pending_field"] = sc["missing"][0]
             sc["phase"] = "collecting"
-            _log("param_check", f"미충족 -> ask '{sc['pending_field']}'")
+            print(f"[ACTION param_check] 미충족 -> ask '{sc['pending_field']}'", flush=True)
             return _ask_param(sc)
 
         # 4) 충족 → 검증
         sc["phase"] = "validating"
         spec = ACTION_REGISTRY[sc["action"]]
-        _log("validate", f"enter action={sc['action']} params={sc['params']}")
+        print(f"[ACTION validate] enter action={sc['action']} params={sc['params']}", flush=True)
         v = spec.validate(sc["params"])
         sc["validation"] = v
         emit(config, "tool_call", {"agent": "ActionAgent", "tool": f"{sc['action']}_validate_tool",
@@ -530,13 +526,13 @@ def action_node(state: AgentState, config) -> dict:
         if v["ok"]:
             # 검증 통과 → 승인 질문 남기고 턴 종료
             sc["phase"] = "confirming"
-            _log("validate", "PASS -> ask_confirm")
+            print(f"[ACTION validate] PASS -> ask_confirm", flush=True)
             return _ask_confirm(sc)
 
         sc["validate_retries"] = sc.get("validate_retries", 0) + 1
         if sc["validate_retries"] >= cfg.MAX_VALIDATE:
             sc["abandon_reason"] = f"유효성 검증에 반복 실패해 요청을 종료합니다. (사유: {v['reason']})"
-            _log("validate", f"MAX_VALIDATE 초과 -> abandon ({v['reason']})")
+            print(f"[ACTION validate] MAX_VALIDATE 초과 -> abandon ({v['reason']})", flush=True)
             return _abandon(sc)
 
         # 문제가 된 파라미터만 비우고 재수집 (수렴 보장 지점)
@@ -544,12 +540,12 @@ def action_node(state: AgentState, config) -> dict:
             sc["params"].pop(bad, None)
         sc["last_parse_error"] = f"검증 실패: {v['reason']}"
         sc["phase"] = "param_check"
-        _log("validate", f"FAIL({v['code']}) -> {v.get('bad_fields')} 비우고 재수집")
+        print(f"[ACTION validate] FAIL({v['code']}) -> {v.get('bad_fields')} 비우고 재수집", flush=True)
         # continue -> 루프 맨 위 param_check 부터
 
     # 루프 상한 — 정상 경로에서는 도달하지 않는다
     sc["abandon_reason"] = "내부 루프 한도를 초과해 요청을 종료합니다."
-    _log("loop", f"MAX_LOOP_TURNS({MAX_LOOP_TURNS}) 초과 -> abandon")
+    print(f"[ACTION loop] MAX_LOOP_TURNS({MAX_LOOP_TURNS}) 초과 -> abandon", flush=True)
     return _abandon(sc)
 
 

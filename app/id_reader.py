@@ -28,10 +28,6 @@ import re
 from app.actions import mock_db
 
 
-def _log(msg: str):
-    print(f"[ID_READER] {msg}", flush=True)
-
-
 # ID 후보 토큰: 영숫자 3~20자 중 숫자를 하나라도 포함한 것.
 #
 # 이건 '유효한 ID 인지' 판정하는 정규식이 아니다. 형식은 여기서 따지지 않는다.
@@ -78,8 +74,8 @@ def id_lookup_tool(candidates: list) -> dict:
         else:
             unknown.append(cand)
 
-    _log(f"후보={list(candidates or [])} -> carrier={carrier_ids} "
-         f"eqp={eqp_ids} unknown={unknown}")
+    print(f"[ID_READER] 후보={list(candidates or [])} -> carrier={carrier_ids} "
+          f"eqp={eqp_ids} unknown={unknown}", flush=True)
     return {"carrier_ids": carrier_ids, "eqp_ids": eqp_ids, "unknown": unknown}
 
 

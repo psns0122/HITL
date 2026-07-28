@@ -13,11 +13,6 @@ from app.actions import mock_db
 from app.id_reader import extract_ids
 
 
-def _log(tool_name: str, msg: str):
-    """툴 로그 한 줄. flush 를 켜야 SSE 스트림과 순서가 섞이지 않는다."""
-    print(f"[TOOL {tool_name}] {msg}", flush=True)
-
-
 # ─────────────────────────────────────────────────────────────────────────
 # GeneralAgent 용
 # ─────────────────────────────────────────────────────────────────────────
@@ -25,7 +20,7 @@ def _log(tool_name: str, msg: str):
 @tool
 def general_tool(question: str) -> str:
     """일반적인 챗봇 사용 안내를 돌려준다. 사내 데이터가 필요 없는 질문에 쓴다."""
-    _log("general", f"enter question={question!r}")
+    print(f"[TOOL general] enter question={question!r}", flush=True)
 
     answer = (
         "AMHS 반송 시스템 챗봇입니다.\n"
@@ -34,14 +29,14 @@ def general_tool(question: str) -> str:
         "- 반송요청명령(transport), 목적지요청(dest_req) 실행"
     )
 
-    _log("general", "done")
+    print(f"[TOOL general] done", flush=True)
     return answer
 
 
 @tool
 def amhs_rag_tool(query: str) -> str:
     """AMHS 운영 문서에서 관련 내용을 찾아온다 (목업: 고정 문서 스니펫)."""
-    _log("amhs_rag", f"enter query={query!r}")
+    print(f"[TOOL amhs_rag] enter query={query!r}", flush=True)
 
     # 사내 구현 자리: 벡터 검색 -> 상위 청크 반환
     snippet = (
@@ -49,7 +44,7 @@ def amhs_rag_tool(query: str) -> str:
         "현재 위치에서 도달 가능할 때만 수행됩니다."
     )
 
-    _log("amhs_rag", f"1건 반환 ({len(snippet)}자)")
+    print(f"[TOOL amhs_rag] 1건 반환 ({len(snippet)}자)", flush=True)
     return snippet
 
 
@@ -60,68 +55,68 @@ def amhs_rag_tool(query: str) -> str:
 @tool
 def queue_status_tool(fab: str = "") -> str:
     """반송 큐 적체 상태를 조회한다."""
-    _log("queue_status", f"enter fab={fab!r}")
+    print(f"[TOOL queue_status] enter fab={fab!r}", flush=True)
 
     # 사내 구현 자리: 큐 테이블 조회
     result = "반송 큐: 대기 12건, 진행 3건, 평균 대기 42초 (임계치 이내)"
 
-    _log("queue_status", f"result={result}")
+    print(f"[TOOL queue_status] result={result}", flush=True)
     return result
 
 
 @tool
 def server_status_tool(server: str = "") -> str:
     """AMHS 서버 프로세스 상태를 조회한다."""
-    _log("server_status", f"enter server={server!r}")
+    print(f"[TOOL server_status] enter server={server!r}", flush=True)
 
     result = "MCS-01 RUNNING / MCS-02 RUNNING / OHT-CTRL RUNNING (이상 없음)"
 
-    _log("server_status", f"result={result}")
+    print(f"[TOOL server_status] result={result}", flush=True)
     return result
 
 
 @tool
 def sysadmin_tool(command: str = "") -> str:
     """시스템 관리 정보를 조회한다 (읽기 전용 목업)."""
-    _log("sysadmin", f"enter command={command!r}")
+    print(f"[TOOL sysadmin] enter command={command!r}", flush=True)
 
     result = "디스크 61% / 메모리 48% / 최근 재기동 2026-07-20 03:10"
 
-    _log("sysadmin", f"result={result}")
+    print(f"[TOOL sysadmin] result={result}", flush=True)
     return result
 
 
 @tool
 def patch_plan_search_tool(keyword: str = "") -> str:
     """예정된 패치 계획을 검색한다."""
-    _log("patch_plan_search", f"enter keyword={keyword!r}")
+    print(f"[TOOL patch_plan_search] enter keyword={keyword!r}", flush=True)
 
     result = "2026-08-03 02:00~04:00 MCS 정기 패치 예정 (반송 일시 중단)"
 
-    _log("patch_plan_search", f"result={result}")
+    print(f"[TOOL patch_plan_search] result={result}", flush=True)
     return result
 
 
 @tool
 def eqp_search_tool(eqp_id: str = "") -> str:
     """장비 정보를 조회한다. 목업 DB 의 equipment 테이블을 본다."""
-    _log("eqp_search", f"enter eqp_id={eqp_id!r}")
+    print(f"[TOOL eqp_search] enter eqp_id={eqp_id!r}", flush=True)
 
     # eqp_id 를 안 주면 전체 목록을 돌려준다
     if not eqp_id:
         names = ", ".join(mock_db.MOCK_DB["equipment"].keys())
-        _log("eqp_search", f"전체 목록 {len(mock_db.MOCK_DB['equipment'])}건")
+        print(f"[TOOL eqp_search] 전체 목록 {len(mock_db.MOCK_DB['equipment'])}건", flush=True)
         return f"등록 장비: {names}"
 
     info = mock_db.MOCK_DB["equipment"].get(eqp_id.upper())
     if not info:
-        _log("eqp_search", "미존재")
+        print(f"[TOOL eqp_search] 미존재", flush=True)
         return f"장비 {eqp_id} 를 찾을 수 없습니다."
 
     reachable = mock_db.MOCK_DB["reachable"].get(eqp_id.upper(), [])
     result = (f"{eqp_id.upper()}: type={info['type']}, online={info['online']}, "
               f"도달가능={reachable}")
-    _log("eqp_search", f"result={result}")
+    print(f"[TOOL eqp_search] result={result}", flush=True)
     return result
 
 
@@ -132,14 +127,14 @@ def eqp_search_tool(eqp_id: str = "") -> str:
 @tool
 def location_search_tool(carrier_id: str) -> str:
     """캐리어가 현재 어느 장비에 있는지 조회한다."""
-    _log("location_search", f"enter carrier_id={carrier_id!r}")
+    print(f"[TOOL location_search] enter carrier_id={carrier_id!r}", flush=True)
 
     loc = mock_db.get_carrier_location(carrier_id)
     if not loc:
-        _log("location_search", "위치 미확인")
+        print(f"[TOOL location_search] 위치 미확인", flush=True)
         return f"캐리어 {carrier_id} 의 위치를 찾을 수 없습니다."
 
-    _log("location_search", f"result={loc}")
+    print(f"[TOOL location_search] result={loc}", flush=True)
     return f"캐리어 {carrier_id} 는 현재 {loc} 에 있습니다."
 
 
@@ -150,7 +145,7 @@ def location_search_tool(carrier_id: str) -> str:
 @tool
 def log_search_tool(carrier_id: str = "") -> str:
     """반송 이력과 에러 로그를 조회해 원인 장비까지 뽑아낸다."""
-    _log("log_search", f"enter carrier_id={carrier_id!r}")
+    print(f"[TOOL log_search] enter carrier_id={carrier_id!r}", flush=True)
 
     analysis = mock_db.analyze_transport_logs(carrier_id or None)
 
@@ -159,8 +154,8 @@ def log_search_tool(carrier_id: str = "") -> str:
         f"  - {c['eqp']} {c['reason']}/{c['description']} x{c['count']} (최초 {c['first_t']})"
         for c in analysis["combos"]
     ]
-    _log("log_search", f"콤보 {len(analysis['combos'])}건, "
-                       f"원인 장비={analysis['cause_eqp']}")
+    print(f"[TOOL log_search] 콤보 {len(analysis['combos'])}건, "
+          f"원인 장비={analysis['cause_eqp']}", flush=True)
 
     return "\n".join(
         [f"반송 이력 분석 (carrier={carrier_id or '전체'})",
@@ -179,12 +174,12 @@ def log_search_tool(carrier_id: str = "") -> str:
 @tool
 def fab_extract_tool(text: str) -> str:
     """질문에서 FAB 정보를 추출한다 (목업: 고정 FAB)."""
-    _log("fab_extract", f"enter text={text!r}")
+    print(f"[TOOL fab_extract] enter text={text!r}", flush=True)
 
     # 사내 구현 자리: 발화에서 FAB 코드 파싱
     fab = "M16"
 
-    _log("fab_extract", f"result fab={fab}")
+    print(f"[TOOL fab_extract] result fab={fab}", flush=True)
     return f"fab={fab}"
 
 
@@ -194,13 +189,13 @@ def params_extract_tool(text: str) -> str:
 
     ExtractAgent 의 핵심 기능. 뒤에 붙는 에이전트들이 이 결과를 재료로 쓴다.
     """
-    _log("params_extract", f"enter text={text!r}")
+    print(f"[TOOL params_extract] enter text={text!r}", flush=True)
 
     ids = extract_ids(text)
     carriers = ids.get("carrier_ids") or []
     eqps = ids.get("eqp_ids") or []
 
-    _log("params_extract", f"carrier_ids={carriers} eqp_ids={eqps}")
+    print(f"[TOOL params_extract] carrier_ids={carriers} eqp_ids={eqps}", flush=True)
 
     if not carriers and not eqps:
         return "추출된 ID 가 없습니다."

@@ -12,10 +12,6 @@ LocationAgent / LogAgent / ActionAgent 검증 툴이 모두 이 모듈의 조회
 from datetime import datetime, timedelta
 
 
-def _log(msg: str):
-    print(f"[MOCK_DB] {msg}", flush=True)
-
-
 MOCK_DB = {
     # carrier_id -> 현재 상태
     "carriers": {
@@ -88,7 +84,7 @@ def get_carrier_location(carrier_id: str) -> str | None:
     """캐리어의 현재 장비 위치. LocationAgent 와 ActionAgent 참조 해석이 공유."""
     c = get_carrier(carrier_id)
     loc = c["current_eqp"] if c else None
-    _log(f"get_carrier_location({carrier_id}) -> {loc}")
+    print(f"[MOCK_DB] get_carrier_location({carrier_id}) -> {loc}", flush=True)
     return loc
 
 
@@ -98,7 +94,7 @@ def get_equipment(eqp_id: str) -> dict | None:
 
 def is_reachable(from_eqp: str, to_eqp: str) -> bool:
     ok = (to_eqp or "").upper() in MOCK_DB["reachable"].get((from_eqp or "").upper(), [])
-    _log(f"is_reachable({from_eqp} -> {to_eqp}) -> {ok}")
+    print(f"[MOCK_DB] is_reachable({from_eqp} -> {to_eqp}) -> {ok}", flush=True)
     return ok
 
 
@@ -118,7 +114,7 @@ def analyze_transport_logs(carrier_id: str | None = None) -> dict:
     cid = (carrier_id or "").upper() or None
     rows = [r for r in MOCK_DB["transport_logs"]
             if (cid is None or r["carrier"] == cid)]
-    _log(f"analyze_transport_logs(carrier={cid}) rows={len(rows)}")
+    print(f"[MOCK_DB] analyze_transport_logs(carrier={cid}) rows={len(rows)}", flush=True)
 
     combos: list[dict] = []
     err_count_by_eqp: dict[str, int] = {}
@@ -158,7 +154,7 @@ def analyze_transport_logs(carrier_id: str | None = None) -> dict:
         "cause_eqp": cause_eqp,
         "recommended_dest": recommended,
     }
-    _log(f"analyze -> cause_eqp={cause_eqp}, recommended_dest={recommended}, combos={len(combos)}")
+    print(f"[MOCK_DB] analyze -> cause_eqp={cause_eqp}, recommended_dest={recommended}, combos={len(combos)}", flush=True)
     return result
 
 
