@@ -6,7 +6,7 @@ ACTION_REGISTRY 에 등록. 서브그래프 배선은 건드릴 필요 없다.
 from dataclasses import dataclass
 from typing import Callable
 
-from app.actions import tools
+from app import _tool as tools
 
 
 @dataclass

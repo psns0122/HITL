@@ -48,8 +48,8 @@ import app.config as cfg
 from app._agent import action_agent
 from app._state import AgentState
 from app._util import emit, last_human_text
-from app.actions.registry import ACTION_REGISTRY, ACTION_SELECT_PROMPT
-from app.actions.tools import param_check_tool
+from app._registry import ACTION_REGISTRY, ACTION_SELECT_PROMPT
+from app._tool import param_check_tool
 # ID 판독기는 ExtractAgent 소유의 툴이지만, HITL 수집 루프는 답변마다 판독이
 # 필요해 Supervisor 왕복을 태울 수 없다. 예외적으로 툴만 공용으로 빌려 쓴다.
 from app.id_reader import id_candidates, id_lookup_tool

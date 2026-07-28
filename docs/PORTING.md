@@ -50,18 +50,18 @@
 
 | 파일 | 내용 | 사내 반입 시 손볼 곳 |
 |---|---|---|
-| `app/actions/` 패키지 전체 | ActionAgent 도메인 | `mock_db.py` → 나중에 실 DB (7단계) |
+| `_action.py`/`_registry.py`/`_db.py` + `_tool.py` 의 ActionAgent 섹션 | ActionAgent 도메인 | `_db.py` → 나중에 실 DB (7단계) |
 | ├ `node.py` | **턴 기반 HITL 단일 노드** (핵심) | 없음 |
 | ├ `registry.py` | ActionSpec + 액션 2종 등록 | 액션 추가 시 여기만 |
 | ├ `tools.py` | param_check / validate / confirm / execute | validate/execute 본문 (7단계) |
 | ├ `resolvers.py` | 답변 판정 (취소/값/상담/맥락이탈) | 취소·전환 키워드 사내 어휘 보강 |
-| └ `mock_db.py` | 목업 DB + 공유 조회 함수 | 실 DB 로 교체 (7단계) |
+| └ `_db.py` | 목업 DB + 공유 조회 함수 | 실 DB 로 교체 (7단계) |
 | `app/id_reader.py` | ID 판독기 (정규식 후보 → 존재 조회) | `id_lookup_tool` 본문 → 실 DB (7단계) |
 | `app/_prompt.py` | 프롬프트 모음 | 문구 전부 사내화 가능 (로직 무관) |
 | `app/api/usage_store.py` | thread별 토큰/시간 원장 | 선택 (안 쓰면 routes 에서 호출 제거) |
 | `app/api/limits.py` | 동시성/유량 제어 | 선택 |
 
-**확인**: `python -c "from app.actions.node import action_node; print('ok')"`
+**확인**: `python -c "from app._action import action_node; print('ok')"`
 
 ---
 
@@ -175,7 +175,7 @@ supervisor_conditional_map["END"] = END   # awaiting 턴은 FinalAnswer 없이 �
 `_builder.py` 변경은 사실상 3줄입니다:
 
 ```python
-from app.actions.node import build_action_node
+from app._action import build_action_node
 workflow.add_node("ActionAgent", build_action_node())   # 기존 action_node 자리에
 supervisor_conditional_map["END"] = END                  # 4단계에서 이미
 ```
@@ -231,7 +231,7 @@ add_edge(member, "Supervisor")`)가 도는 건 사내 코드 그대로면 자동
 | 교체 지점 | 파일 | 비고 |
 |---|---|---|
 | ID 판독기 | `id_reader.py` 의 `id_lookup_tool` 본문 | 후보 문자열 → DB 존재 조회. **여기 한 곳만** 바꾸면 수집/상담/추출 전부 따라옴 |
-| 검증/실행 | `actions/tools.py` 의 `*_validate_tool` / `*_execute_tool` | 시그니처 유지하면 node.py 무수정 |
+| 검증/실행 | `_tool.py (ActionAgent 섹션)` 의 `*_validate_tool` / `*_execute_tool` | 시그니처 유지하면 node.py 무수정 |
 | LLM | `_llm.get_llm` | 이미 게이트웨이 규약(placeholder EMPTY 등) 맞춰둠. 사내 llm_t1 이 있으면 그걸로 |
 | 워커 스텁 | `_node.py` 의 location/status/log/extract | 사내 실제 노드로 교체. **계약 하나만 유지**: 결과를 `AIMessage(name=에이전트명)` 으로 messages 에 남길 것 (Supervisor 의 상담 회수가 그걸 읽음) |
 | 프롬프트 | `_prompt.py` | 문구 교체 자유 |
@@ -242,7 +242,7 @@ add_edge(member, "Supervisor")`)가 도는 건 사내 코드 그대로면 자동
 
 ## 이식하지 않는 것
 
-- `mock_db.py` 의 데이터 (교체 대상)
+- `_db.py` 의 데이터 (교체 대상)
 - `streamlit_app.py` — 사내 프론트가 따로 있으면 `stream_chat()` 파서만 가져감
 - `notebooks/`, `docs/`, `tests/` — 원하는 만큼만
 

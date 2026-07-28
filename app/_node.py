@@ -15,7 +15,7 @@ from app._util import (
     last_user_text,
     member_answered_this_turn,
 )
-from app.actions import mock_db
+from app import _db as mock_db
 from app.id_reader import extract_ids
 
 # Supervisor 밑에 붙는 워커들

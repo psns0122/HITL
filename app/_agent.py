@@ -9,7 +9,7 @@
   LocationAgent   : 캐리어 위치
   LogAgent        : 반송 이력·에러 분석
   ExtractAgent    : FAB/파라미터 추출 (모든 워커에 선행)
-  ActionAgent     : 명령 실행 (HITL — actions/node.py 가 담당)
+  ActionAgent     : 명령 실행 (HITL — _action.py 가 담당)
   FinalAnswerAgent / FinalGeneralAgent : 최종 응답 생성(스트리밍)
 """
 from dataclasses import dataclass, field
@@ -21,7 +21,7 @@ from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field
 
 from app import _llm, _prompt, _state, _tool, _util
-from app.actions.registry import ACTION_REGISTRY
+from app._registry import ACTION_REGISTRY
 
 
 # ─────────────────────────────────────────────────────────────────────────

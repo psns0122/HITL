@@ -25,7 +25,7 @@ Supervisor-ExtractAgent 왕복을 태우면 답변 하나에 그래프가 한 �
 """
 import re
 
-from app.actions import mock_db
+from app import _db as mock_db
 
 
 # ID 후보 토큰: 영숫자 3~20자 중 숫자를 하나라도 포함한 것.

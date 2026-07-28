@@ -24,7 +24,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app import _node, _state
-from app.actions.node import build_action_node
+from app._action import build_action_node
 
 # ── 프로세스 공용 체크포인터 ──────────────────────────────────────────────
 # 그래프는 모델별로 따로 빌드되지만, 체크포인터는 절대 모델별로 나누면 안 된다.

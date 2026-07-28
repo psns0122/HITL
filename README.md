@@ -70,7 +70,7 @@ python3 tests/test_streamlit_ui.py     # Streamlit UI E2E (위젯 조작 → 실
 
 ### ActionAgent 내부 논리 흐름 (⏸ = 질문 남기고 턴 종료)
 
-> 아래는 **논리 단계**입니다. 구현은 `app/actions/node.py` 의 노드 함수
+> 아래는 **논리 단계**입니다. 구현은 `app/_action.py` 의 노드 함수
 > **하나**(action_node)이며, 단계들은 함수 안의 분기/루프입니다.
 > 턴 기반은 interrupt 재실행 격리가 필요 없어 서브그래프로 쪼갤 이유가 없습니다.
 
@@ -391,7 +391,7 @@ app/
 ├── _mcp.py              # MCP 커넥션 매니저 (lifespan 훅, 스텁)
 ├── _builder.py          # build_team_graph — 기존 배선 + ActionAgent 삽입
 ├── actions/             # ★ ActionAgent 도메인
-│   ├── mock_db.py       #   목업 DB + 공유 조회 함수(LocationAgent 도 재사용)
+│   ├── _db.py       #   목업 DB + 공유 조회 함수(LocationAgent 도 재사용)
 │   ├── registry.py      #   ActionSpec + ACTION_REGISTRY ← 액션 추가 지점
 │   ├── resolvers.py     #   답변 해석 4분기 / 승인 판정
 │   ├── tools.py         #   param_check / validate / confirm / execute
@@ -424,7 +424,7 @@ origin/                  # ← HITL 이전 사내 원본 (비교 전용, 실행 
 | LocationAgent | `location_search_tool` |
 | LogAgent | `log_search_tool` |
 | ExtractAgent | `fab_extract_tool`, `params_extract_tool` |
-| ActionAgent | (단일 노드가 직접 호출 — `actions/tools.py`, `id_reader.py`) |
+| ActionAgent | (단일 노드가 직접 호출 — `_tool.py (ActionAgent 섹션)`, `id_reader.py`) |
 
 모든 툴은 `disable_tool_caching()` 을 거칩니다. 설비/캐리어 상태는 계속 바뀌므로
 같은 질문이라도 매번 실제 DB 를 봐야 하기 때문입니다.
@@ -453,7 +453,7 @@ ExtractAgent 는 답변을 내는 워커가 아니라 **뒤 단계가 쓸 ID 재
 
 ### 액션 추가하기
 
-`app/actions/registry.py` 에 `ActionSpec` 한 개를 추가하고 툴 3개(validate/confirm/execute)를
+`app/_registry.py` 에 `ActionSpec` 한 개를 추가하고 툴 3개(validate/confirm/execute)를
 쓰면 끝입니다. 그래프 배선은 건드릴 필요 없습니다.
 
 ```python
@@ -509,7 +509,7 @@ ACTION_REGISTRY["hold_carrier"] = ActionSpec(
 2. `app/_llm.py` 의 `get_llm()` 확인 — 이미 사내 게이트웨이 호출 패턴
    (`ChatOpenAI(base_url=…, api_key=… or "EMPTY", max_tokens, max_retries, timeout)`)에
    맞춰져 있습니다. 사내 공용 래퍼(`_llm.llm_t1`)가 따로 있으면 그것으로 교체하세요.
-3. `app/actions/mock_db.py` 를 실제 DB 조회로 교체 (함수 시그니처는 그대로 두면 나머지는 무수정)
+3. `app/_db.py` 를 실제 DB 조회로 교체 (함수 시그니처는 그대로 두면 나머지는 무수정)
 4. `app/_node.py` 의 Location/Status/Log/Extract 스텁을 사내 실제 노드로 교체
    — 워커에는 needs 관련 코드가 없으므로 **그냥 갈아끼우면 됩니다.**
    needs 상담 배분은 Supervisor(`_agent.needs_dispatch` + 로스터 프롬프트)가 하므로,
