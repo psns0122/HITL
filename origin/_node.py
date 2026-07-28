@@ -286,30 +286,61 @@ async def general_node(state: _state.AgentState) -> _state.AgentState:
 # ─────────────────────────────────────────────────────────────────────────
 
 async def final_node(state: _state.AgentState) -> _state.AgentState:
-    try:
-        agent = _agent.create_final_agent(model_name=state.get("model_name"))
-        result = await _util.agent_node(state, agent, "FinalAnswerAgent")
-        result["next"] = "FINISH"
-        return result
-    except Exception as e:
-        print(f"[ERROR] Failed to execute FinalAnswerAgent: {e}")
-        return {
-            "messages": [AIMessage(content="답변 생성 중 오류가 발생했습니다.")],
-            "next": "FINISH",
-            "step": state.get("step", 0) + 1,
-        }
+    print("[NODE] FinalAnswer entered")
+
+    # create_final_agent 는 _ainvoke(state) 함수를 돌려준다 — 만들어서 바로 부른다
+    out = await _agent.create_final_agent(model_name=state.get("model_name"))(state)
+
+    msgs = out.get("messages", []) or []
+
+    if msgs == []:
+        print("[ERROR] 비어있는 FINAL 응답")
+    else:
+        msg = msgs[0]
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        finish = msg.response_metadata.get("finish_reason")
+
+        # 빈 본문이거나 정상 종료(stop)가 아니면 폴백 문구로 교체한다
+        is_empty = not content.strip()
+        is_weird_finish = finish not in ("stop", None)
+
+        if is_empty or is_weird_finish:
+            print(f"[ERROR] 비정상 FINAL 응답 종료 "
+                  f"content={content[:80]!r} finish_reason={finish}")
+            msgs = [AIMessage(content="응답 생성에 실패했습니다. 다시 시도해주세요.")]
+
+    return {
+        "messages": msgs,
+        "next": "END",
+        "step": state.get("step", 0) + 1,
+    }
 
 
 async def final_general_node(state: _state.AgentState) -> _state.AgentState:
-    try:
-        agent = _agent.create_final_general_agent(model_name=state.get("model_name"))
-        result = await _util.agent_node(state, agent, "FinalGeneralAgent")
-        result["next"] = "FINISH"
-        return result
-    except Exception as e:
-        print(f"[ERROR] Failed to execute FinalGeneralAgent: {e}")
-        return {
-            "messages": [AIMessage(content="답변 생성 중 오류가 발생했습니다.")],
-            "next": "FINISH",
-            "step": state.get("step", 0) + 1,
-        }
+    """final_node 와 같은 구조. 에이전트만 FinalGeneral 로 다르다."""
+    print("[NODE] FinalGeneral entered")
+
+    out = await _agent.create_final_general_agent(model_name=state.get("model_name"))(state)
+
+    msgs = out.get("messages", []) or []
+
+    if msgs == []:
+        print("[ERROR] 비어있는 FINAL_GENERAL 응답")
+    else:
+        msg = msgs[0]
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        finish = msg.response_metadata.get("finish_reason")
+
+        is_empty = not content.strip()
+        is_weird_finish = finish not in ("stop", None)
+
+        if is_empty or is_weird_finish:
+            print(f"[ERROR] 비정상 FINAL_GENERAL 응답 종료 "
+                  f"content={content[:80]!r} finish_reason={finish}")
+            msgs = [AIMessage(content="응답 생성에 실패했습니다. 다시 시도해주세요.")]
+
+    return {
+        "messages": msgs,
+        "next": "END",
+        "step": state.get("step", 0) + 1,
+    }
