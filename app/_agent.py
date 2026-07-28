@@ -444,6 +444,154 @@ def extract_intent(text: str, config=None, model_name: str = None) -> resolvers.
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# ActionAgent 판단부 — action_node 가 가지는 에이전트
+#
+# 사내 규칙: 이런 결정은 전부 LLM 이 한다. 노드는 판단하지 않고 이 에이전트를
+# 호출만 한다. resolvers 의 정규식은 FAKE_LLM 모드(데모/테스트)와 LLM 실패
+# 폴백에서만 쓰인다.
+# ─────────────────────────────────────────────────────────────────────────
+
+class CollectAnswerOut(BaseModel):
+    kind: Literal["cancel", "consult", "switch", "action", "value", "empty"]
+    # kind == "action" 일 때만 채운다 (반송/목적지 선택)
+    action_choice: Optional[Literal["transport", "dest_req"]] = None
+
+
+def classify_collect_answer(fieldname: str, answer, current_action: str | None,
+                            question: str = None, config=None,
+                            model_name: str = None) -> dict:
+    """파라미터 질문에 대한 사용자 답변을 분류한다.
+
+    반환 dict 는 resolvers.resolve_param_answer 와 같은 모양이다:
+      {"kind": cancel|consult|switch|action|value|empty, "text"/"value"/"note"...}
+
+    value 로 분류돼도 실제 ID 인식·존재 확인은 판독기 툴(id_reader)이 한다 —
+    LLM 은 종류만 판단하고 값은 만들어내지 않는다.
+    """
+    text = str(answer or "")
+
+    # 목업 모드: 규칙 해석기가 LLM 자리를 대신한다
+    if cfg.FAKE_LLM:
+        r = resolvers.resolve_param_answer(fieldname, answer, current_action)
+        _util.fake_llm_echo("action_collect_answer",
+                            json.dumps({"kind": r["kind"]}, ensure_ascii=False),
+                            config=config, model_name=model_name)
+        return r
+
+    # 실제 LLM 호출
+    try:
+        out: CollectAnswerOut = structured_invoke(
+            get_llm(model_name, temperature=0.0),
+            CollectAnswerOut,
+            [
+                SystemMessage(content=_prompt.action_collect_answer_prompt().strip()),
+                HumanMessage(content=(
+                    f"진행 중인 명령: {current_action or '미확정'}\n"
+                    f"물어본 것: {question or fieldname}\n"
+                    f"묻는 파라미터: {fieldname}\n"
+                    f"사용자의 답변(원문): {text}"
+                )),
+            ],
+            config=config,
+        )
+        _log(f"classify_collect_answer(llm) -> {out.kind}")
+
+        if out.kind == "cancel":
+            return {"kind": "cancel"}
+        if out.kind == "consult":
+            return {"kind": "consult", "text": text}
+        if out.kind == "switch":
+            return {"kind": "switch", "text": text}
+        if out.kind == "action":
+            if fieldname == "action" and out.action_choice:
+                return {"kind": "action", "value": out.action_choice}
+            # action 을 묻던 게 아닌데 action 이라 답함 -> 재질문으로 강등
+            return {"kind": "empty", "note": "답변을 이해하지 못했습니다."}
+        if out.kind == "value":
+            return {"kind": "value", "text": text}
+        return {"kind": "empty", "note": f"답변에서 {fieldname} 값을 찾지 못했습니다."}
+
+    except Exception as e:
+        _log(f"classify_collect_answer llm 실패({e}) -> 규칙 폴백")
+        return resolvers.resolve_param_answer(fieldname, answer, current_action)
+
+
+class ConfirmOut(BaseModel):
+    verdict: Literal["approve", "reject", "unclear"]
+
+
+def classify_confirm(answer, action: str = None, params: dict = None,
+                     config=None, model_name: str = None) -> str:
+    """승인 질문에 대한 답변 판정 -> approve | reject | unclear.
+
+    approve 는 명시적 동의일 때만. 정정 시도("STK103 으로 바꿔줘")는
+    unclear 로 돌려서 호출부가 수집 루프로 되돌릴 수 있게 한다.
+    """
+    # dict 센티널(/chat/stop 등)은 규칙이 정확하다 — LLM 태울 이유가 없다
+    if isinstance(answer, dict):
+        return resolvers.detect_confirm_verdict(answer)
+
+    # 목업 모드: 규칙 판정기가 LLM 자리를 대신한다
+    if cfg.FAKE_LLM:
+        v = resolvers.detect_confirm_verdict(answer)
+        _util.fake_llm_echo("action_confirm",
+                            json.dumps({"verdict": v}, ensure_ascii=False),
+                            config=config, model_name=model_name)
+        return v
+
+    # 실제 LLM 호출
+    try:
+        out: ConfirmOut = structured_invoke(
+            get_llm(model_name, temperature=0.0),
+            ConfirmOut,
+            [
+                SystemMessage(content=_prompt.action_confirm_prompt().strip()),
+                HumanMessage(content=(
+                    f"실행하려는 명령: {action or '?'} (파라미터: {params})\n"
+                    f"사용자의 답변(원문): {answer}"
+                )),
+            ],
+            config=config,
+        )
+        _log(f"classify_confirm(llm) -> {out.verdict}")
+        return out.verdict
+
+    except Exception as e:
+        _log(f"classify_confirm llm 실패({e}) -> 규칙 폴백")
+        return resolvers.detect_confirm_verdict(answer)
+
+
+def answer_seems_informative(text: str, config=None, model_name: str = None) -> bool:
+    """'판독기로 값은 못 읽었지만 정보가 실린 답'인지 — 상담을 태울지 결정.
+
+    실모드에서는 이 지점에 오는 답이 이미 LLM 에게 value(정보성)로 분류된
+    상태이므로 그 판단을 신뢰한다(추가 호출 없음). 규칙 휴리스틱은
+    FAKE 모드에서만 쓴다.
+    """
+    if cfg.FAKE_LLM:
+        return resolvers.looks_substantive(text)
+    return True
+
+
+class _ActionAgent:
+    """action_node 가 가지는 판단 에이전트.
+
+    노드는 흐름(수집 루프/턴 종료)만 잡고, 아래 판단은 전부 여기로 위임한다.
+      - extract_intent            : 최초 발화 -> 의도/파라미터/참조
+      - classify_collect_answer   : 파라미터 질문의 답 -> 종류 분류
+      - classify_confirm          : 승인 질문의 답 -> approve/reject/unclear
+      - answer_seems_informative  : 못 읽은 답에 정보가 실렸는지
+    """
+    extract_intent = staticmethod(extract_intent)
+    classify_collect_answer = staticmethod(classify_collect_answer)
+    classify_confirm = staticmethod(classify_confirm)
+    answer_seems_informative = staticmethod(answer_seems_informative)
+
+
+action_agent = _ActionAgent()
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # 최종 응답 에이전트
 #   FinalAnswerAgent 와 FinalGeneralAgent 는 프롬프트만 다르고 로직은 같다.
 # ─────────────────────────────────────────────────────────────────────────

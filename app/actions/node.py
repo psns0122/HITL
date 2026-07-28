@@ -1,5 +1,13 @@
 """ActionAgent — 턴 기반 HITL, 단일 노드 버전.
 
+판단과 흐름의 분리 (사내 규칙)
+-----------------------------
+이 노드는 판단하지 않는다. 의도 추출·답변 분류·승인 판정 같은 결정은 전부
+action_node 가 가진 에이전트(_agent.action_agent)가 LLM 으로 한다. 노드는
+그 결과에 따라 수집 루프를 돌리고 턴을 닫는 흐름만 담당한다.
+(resolvers 의 정규식 규칙은 FAKE_LLM 모드와 LLM 실패 폴백에서만 쓰인다.
+ 예외는 ID 인식 — 이것은 LLM 판단이 아니라 판독기 툴의 DB 조회다.)
+
 hitl_new(서브그래프 13노드)의 동작을 그대로 유지하면서 노드 함수 하나로 접었다.
 부모 그래프에서는 똑같이 Supervisor 밑 member 노드 하나다.
 
@@ -37,7 +45,7 @@ needs-핸드오프
 from langchain_core.messages import AIMessage, HumanMessage
 
 import app.config as cfg
-from app._agent import extract_intent
+from app._agent import action_agent
 from app._state import AgentState
 from app._util import emit, last_human_text
 from app.actions import resolvers
@@ -56,26 +64,6 @@ MAX_LOOP_TURNS = 40
 
 def _log(step: str, msg: str):
     print(f"[ACTION {step}] {msg}", flush=True)
-
-
-# 추임새/기호를 걷어낸 알맹이가 이만큼은 남아야 '정보가 있는 답변'으로 본다
-_NOISE_CHARS_RE = None   # lazy compile
-
-
-def _looks_substantive(text: str) -> bool:
-    """답변에 '정보가 실려 있어 보이는지' 대충 가른다.
-
-    Supervisor 상담(LLM 1회)을 태울 가치가 있는 답인지 거르는 문지방일 뿐,
-    정밀할 필요는 없다. 잘못 통과해도 결과는 상담 1회 후 재질문이고,
-    잘못 걸러져도 결과는 그냥 재질문이다.
-    """
-    global _NOISE_CHARS_RE
-    if _NOISE_CHARS_RE is None:
-        import re
-        # 공백/문장부호/웃음·추임새 자모를 걷어낸다
-        _NOISE_CHARS_RE = re.compile(r"[\s\.\,\?\!…~\-ㅋㅎㅠㅜㅇ]+")
-    core = _NOISE_CHARS_RE.sub("", str(text or ""))
-    return len(core) >= 3
 
 
 def _read_ids(text: str, config) -> dict:
@@ -224,15 +212,19 @@ def _restart(text: str, config) -> dict:
 #   반환값이 dict 면 그대로 턴 종료(abandon/restart), None 이면 수집 루프 계속
 # ─────────────────────────────────────────────────────────────────────────
 
-def _consume_param_answer(sc: dict, answer, config):
-    """수집 질문(collect_param)에 대한 답변 판정.
+def _consume_param_answer(sc: dict, answer, config, model_name=None, question=None):
+    """수집 질문(collect_param)에 대한 답변 처리.
 
     분기: 취소 / 맥락이탈(재시작) / 상담 / 액션선택 / 값 / 재질문
+    ★ 판단은 노드가 하지 않는다 — action_agent(LLM)가 분류하고,
+      노드는 그 결과에 따라 흐름만 잡는다. (규칙은 FAKE 모드/폴백 전용)
     """
     fieldname = sc.get("pending_field")
     _log("merge_param", f"enter field={fieldname}")
 
-    r = resolvers.resolve_param_answer(fieldname, answer, sc.get("action"))
+    r = action_agent.classify_collect_answer(
+        fieldname, answer, sc.get("action"),
+        question=question, config=config, model_name=model_name)
 
     # 취소
     if r["kind"] == "cancel":
@@ -290,9 +282,12 @@ def _consume_param_answer(sc: dict, answer, config):
                                 f"{ids['unknown']}")
             return None
 
-        # ID 판독과 무관한 답변인데 개소리 같지는 않다 -> Supervisor 상담.
-        # ("그 스토커로", "아까 장애 났던 데 말고" 처럼 정보가 실린 것 같은 답)
-        if _looks_substantive(r["text"]):
+        # ID 판독과 무관한 답변인데 정보가 실린 것 같다 -> Supervisor 상담.
+        # ("그 스토커로", "아까 장애 났던 데 말고")
+        # 이 판단도 에이전트 몫 — 실모드에선 이미 LLM 이 value(정보성)로
+        # 분류한 답이므로 그 판단을 신뢰한다.
+        if action_agent.answer_seems_informative(r["text"], config=config,
+                                                 model_name=model_name):
             sc["consult_text"] = r["text"]
             _log("merge_param", f"판독 불가·정보성 답변 -> Supervisor 상담: '{r['text']}'")
             return None
@@ -310,14 +305,16 @@ def _consume_param_answer(sc: dict, answer, config):
     return None
 
 
-def _consume_confirm_answer(sc: dict, decision, config):
-    """승인 질문(confirm)에 대한 답변 판정.
+def _consume_confirm_answer(sc: dict, decision, config, model_name=None):
+    """승인 질문(confirm)에 대한 답변 처리.
 
     execute 로 가는 유일한 길은 명시적 approve 뿐이다.
     반환값이 dict 면 턴 종료(실행완료/abandon), None 이면 수집 루프로 복귀
-    (파라미터 정정).
+    (파라미터 정정). ★ 판정은 action_agent(LLM)가 한다.
     """
-    verdict = resolvers.detect_confirm_verdict(decision)
+    verdict = action_agent.classify_confirm(
+        decision, action=sc.get("action"), params=sc.get("params"),
+        config=config, model_name=model_name)
     _log("confirm_verdict", f"decision={decision!r} -> {verdict}")
     sc["confirm"] = verdict
 
@@ -383,6 +380,7 @@ def action_node(state: AgentState, config) -> dict:
     sc = dict(state.get("action") or {})
     msgs = state.get("messages") or []
     awaiting = sc.get("awaiting")
+    model_name = state.get("model_name")   # 프론트 선택 모델 — 판단 에이전트가 쓴다
 
     # ── 진입 판정 (구 action_entry — 턴 기반의 관제탑) ──────────────────
     #
@@ -406,9 +404,10 @@ def action_node(state: AgentState, config) -> dict:
         sc.pop("awaiting", None)
 
         if awaiting["type"] == "confirm":
-            out = _consume_confirm_answer(sc, answer, config)
+            out = _consume_confirm_answer(sc, answer, config, model_name=model_name)
         else:
-            out = _consume_param_answer(sc, answer, config)
+            out = _consume_param_answer(sc, answer, config, model_name=model_name,
+                                        question=awaiting.get("prompt"))
 
         if out is not None:
             return out           # 실행완료 / abandon / restart — 턴 종료
@@ -425,7 +424,7 @@ def action_node(state: AgentState, config) -> dict:
         _log("entry", "신규 진입")
         _log("infer_intent", f"enter text='{text}'")
         emit(config, "agent_status", {"agent": "ActionAgent", "detail": "신규 진입"})
-        r = extract_intent(text, config=config)
+        r = action_agent.extract_intent(text, config=config, model_name=model_name)
         sc = {
             "action": r.action,
             "phase": "param_check",

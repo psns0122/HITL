@@ -226,3 +226,17 @@ def resolve_param_answer(fieldname: str, answer, current_action: str | None) -> 
 
 # 호환 별칭 (혹시 새 이름을 참조하는 코드가 있어도 안 깨지게)
 classify_collect_answer = resolve_param_answer
+
+
+# 추임새/기호를 걷어낸 알맹이가 이만큼은 남아야 '정보가 있는 답변'으로 본다
+_NOISE_CHARS_RE = re.compile(r"[\s\.\,\?\!…~\-ㅋㅎㅠㅜㅇ]+")
+
+
+def looks_substantive(text: str) -> bool:
+    """답변에 '정보가 실려 있어 보이는지' 규칙으로 가른다 (FAKE 모드/폴백 전용).
+
+    실모드에서는 이 판단도 LLM(action_agent)이 한다. 여기 규칙은
+    Supervisor 상담을 태울 가치가 있는 답인지 거르는 문지방일 뿐이다.
+    """
+    core = _NOISE_CHARS_RE.sub("", str(text or ""))
+    return len(core) >= 3
