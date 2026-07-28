@@ -14,12 +14,11 @@
 워커는 실행 후 항상 Supervisor 로 돌아온다.
 그래서 사용자 질의가 들어오면 언제나 Supervisor 부터 다시 판단하게 된다.
 
-app/_builder.py 와의 차이는 둘뿐이다.
-  1. build_team_graph 가 **매개변수를 받지 않는다.**
-     모델명을 빌더로 보내지 않으므로 노드에 functools.partial 을 걸 일도 없다.
-     (app 은 모델별로 그래프를 여러 벌 빌드하느라 model_name 을 받는다)
-  2. ActionAgent 자리가 평범한 워커 노드다.
-     (app 은 여기에 턴 기반 HITL 단일 노드를 끼운다 — 그게 이번 작업)
+build_team_graph 는 매개변수를 받지 않는다 — 모델명은 빌더가 아니라
+state["model_name"] 으로 흐른다 (app 도 동일하게 맞춰져 있다).
+
+app/_builder.py 와의 차이는 하나다: ActionAgent 자리가 평범한 워커 노드다.
+(app 은 여기에 턴 기반 HITL 단일 노드를 끼운다 — 그게 이번 작업)
 """
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -32,14 +31,11 @@ from origin import _node, _state
 SHARED_CHECKPOINTER = MemorySaver()
 
 
-def build_team_graph(checkpointer=None):
+def build_team_graph():
     """그래프와 체크포인터를 만들어 돌려준다.
 
-    Args:
-        checkpointer: 쓸 체크포인터. None 이면 프로세스 공용 것을 쓴다.
-                      테스트에서 스레드 상태를 격리하고 싶을 때만 따로 넘긴다.
-
-    모델명은 받지 않는다. 노드가 실행 시점에 state["model_name"] 을 읽는다.
+    매개변수는 없다. 모델명은 빌더가 아니라 state["model_name"] 으로 흐르고,
+    체크포인터는 프로세스 공용 SHARED_CHECKPOINTER 하나다.
     """
     workflow = StateGraph(_state.AgentState)
 
@@ -88,7 +84,6 @@ def build_team_graph(checkpointer=None):
     workflow.add_edge("FinalAnswerAgent", END)
     workflow.add_edge("FinalGeneralAgent", END)
 
-    checkpointer = checkpointer or SHARED_CHECKPOINTER
-    graph = workflow.compile(checkpointer=checkpointer)
+    graph = workflow.compile(checkpointer=SHARED_CHECKPOINTER)
 
-    return graph, checkpointer
+    return graph, SHARED_CHECKPOINTER

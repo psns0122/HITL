@@ -183,10 +183,10 @@ supervisor_conditional_map["END"] = END                  # 4단계에서 이미
 members 리스트에 "ActionAgent" 가 있고 복귀 엣지(`for member in members:
 add_edge(member, "Supervisor")`)가 도는 건 사내 코드 그대로면 자동입니다.
 
-⚠️ **체크포인터는 모델별로 나누면 안 됩니다.** 그래프는 모델별 캐시라도
-체크포인터는 프로세스 공용 하나(SHARED_CHECKPOINTER)를 공유해야, 승인 대기 중
-모델을 바꿔도 HITL 이 이어집니다. `graph_service.py` 는 이 저장소 것으로 교체
-(모델명 키 캐시 + 공용 체크포인터).
+⚠️ **그래프는 프로세스에 한 벌, 체크포인터도 하나입니다.**
+`build_team_graph()` 는 매개변수를 받지 않고(사내 원본과 동일), 모델명은
+state["model_name"] 으로 흘러 노드가 실행 시점에 읽습니다. 그래서 승인 대기 중
+모델을 바꿔도 같은 스레드가 이어집니다. `graph_service.py` 는 원본 그대로 두면 됩니다.
 
 **확인**: `tests/test_hitl_scenarios.py` 의 A(수집→승인→실행)/B(거절) 시나리오를
 사내 그래프로 돌려 통과.
