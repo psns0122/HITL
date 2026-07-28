@@ -98,7 +98,7 @@ def save_formatted_log(record: Dict[str, Any]):
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     """질문을 받아 최종 답변 토큰을 흘린다."""
-    graph = get_team_graph()
+    graph, _checkpointer = get_team_graph()
 
     config = {
         "configurable": {"thread_id": req.thread_id},

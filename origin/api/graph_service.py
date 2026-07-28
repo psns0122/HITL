@@ -9,14 +9,15 @@ app/api/graph_service.py 는 여기를 **모델명 키 캐시**로 바꾼 것이
 from origin._builder import build_team_graph
 
 _graph = None
+_checkpointer = None
 
 
 def get_team_graph():
-    """프로세스 공용 그래프. 처음 호출될 때 한 번만 빌드한다."""
-    global _graph
+    """프로세스 공용 (graph, checkpointer). 처음 호출될 때 한 번만 빌드한다."""
+    global _graph, _checkpointer
 
     if _graph is None:
         print("[GRAPH] 빌드", flush=True)
-        _graph = build_team_graph()
+        _graph, _checkpointer = build_team_graph()
 
-    return _graph
+    return _graph, _checkpointer

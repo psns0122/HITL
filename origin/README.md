@@ -78,6 +78,6 @@ diff -u origin/_builder.py app/_builder.py
 | ActionAgent | 일반 react agent | 턴 기반 HITL 단일 노드 |
 | Supervisor | LLM 배분만 | needs-핸드오프 / Extract 선행 / HITL 턴 종료 우선순위 추가 |
 | `AgentState` | messages/route/handoff/next/step/model_name | + `action`, `facts` |
-| 체크포인터 | 없음 (`compile()`) | 프로세스 공용 `InMemorySaver` |
+| 체크포인터 | `MemorySaver` (빌더 안에서 생성) | 모듈 상수로 분리 — 모델별 그래프가 하나를 공유 |
 | 모델 선택 | 상태에 `model_name` 은 있음 | + `/models` API · 모델별 그래프 캐시 |
 | 스트림 | 최종 답변 토큰 | + `\x1e` 제어 프레임 (트레이스/HITL 질문) |

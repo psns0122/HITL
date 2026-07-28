@@ -14,17 +14,24 @@
 
 워커는 실행 후 항상 Supervisor 로 돌아온다.
 
-app/_builder.py 와의 차이는 두 줄이다.
-  1. 체크포인터가 없다 — HITL 이 없으니 재개할 상태도 없다.
+app/_builder.py 와의 차이
+  1. 체크포인터를 여기서 만든다 — app 쪽은 모델별로 그래프를 여러 벌 빌드하므로
+     체크포인터를 모듈 상수로 빼서 **모든 그래프가 하나를 공유**하게 했다.
+     (안 그러면 승인 대기 중에 모델을 바꾸는 순간 그 스레드가 미아가 된다)
   2. Supervisor 분기표에 END 가 없다 — 턴이 질문으로 끝나는 경우가 없다.
 """
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from origin import _node, _state
 
 
 def build_team_graph():
-    """그래프를 만들어 돌려준다."""
+    """그래프와 체크포인터를 만들어 돌려준다.
+
+    체크포인터가 thread_id 별 대화 맥락을 들고 있다.
+    (채팅 세션 하나 = thread_id 하나)
+    """
     workflow = StateGraph(_state.AgentState)
 
     # --- 노드 등록
@@ -71,4 +78,7 @@ def build_team_graph():
     workflow.add_edge("FinalAnswerAgent", END)
     workflow.add_edge("FinalGeneralAgent", END)
 
-    return workflow.compile()
+    checkpointer = MemorySaver()
+    graph = workflow.compile(checkpointer=checkpointer)
+
+    return graph, checkpointer
