@@ -1,55 +1,66 @@
-"""에이전트 정의.  [원본·직접]
+"""에이전트 정의.
 
-사용자가 직접 제공한 코드.
+에이전트마다 하는 일은 같고 붙는 툴만 다르다.
+그래서 create_*_agent 들은 전부 같은 모양이고, tools 인자만 바뀐다.
 
-에이전트가 세 종류로 갈린다 — 이게 이 파일의 구조다.
-
-  1. create_*_agent  : create_react_agent. 툴과 프롬프트만 다르고 나머지는 동일.
-                       Status / Location / Log / Extract / Action
-  2. build_*_agent   : react agent 가 아니라 직접 만든 async 함수.
-                       state 를 읽고 AgentState 조각을 돌려준다.
-                       Router / General
-  3. (없음)          : Supervisor 는 여기 없다. _node.py 가 체인으로 직접 돌린다.
-
-로그는 공통 헬퍼 없이 각 함수가 직접 print 한다.
+  Router          : 일반 질의 / 업무 질의 분류
+  GeneralAgent    : 일반 대화 (필요하면 supervisor 로 handoff)
+  StatusAgent     : 큐/서버/설비/패치 상태
+  LocationAgent   : 캐리어 위치
+  LogAgent        : 반송 이력·에러 분석
+  ExtractAgent    : FAB/파라미터 추출 (모든 워커에 선행)
+  ActionAgent     : 명령 실행 (HITL — actions/node.py 가 담당)
+  FinalAnswerAgent / FinalGeneralAgent : 최종 응답 생성(스트리밍)
 """
-from typing import Any, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Literal, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.prebuilt import create_react_agent
+from pydantic import BaseModel, Field
 
 from origin import _llm, _prompt, _state, _tool, _util
+from app.actions.registry import ACTION_REGISTRY
 
 
-def disable_tool_caching(tools_list):
+# ─────────────────────────────────────────────────────────────────────────
+# 툴 캐싱 비활성화
+# ─────────────────────────────────────────────────────────────────────────
+
+def disable_tool_caching(tools_list: list) -> list:
     """툴 결과 캐싱을 끈다.
 
-    사내 데이터는 조회 시점마다 값이 달라진다. 캐시가 남아 있으면
-    직전 조회 결과를 그대로 돌려줘서 오답이 된다.
+    설비/캐리어 상태는 계속 바뀌므로, 같은 질문이라도 매번 실제 DB 를 봐야 한다.
+    캐시가 켜져 있으면 이전 턴의 낡은 값을 그대로 답해버린다.
     """
+    disabled_tools = []
+
     for t in tools_list:
-        t.cache = False
-    return tools_list
+        if hasattr(t, "cache"):
+            t.cache = False        # 캐시 비활성화
+        disabled_tools.append(t)
+
+    return disabled_tools
 
 
 # ─────────────────────────────────────────────────────────────────────────
 # Router — 일반 질의인지 업무 질의인지
-#   react agent 가 아니다. 분류 한 번 하고 끝이라 툴 루프가 필요 없다.
 # ─────────────────────────────────────────────────────────────────────────
 
 async def classify_route_with_llm(
     user_query: str,
     model_name: str = None,
     temperature: float = 0.0,
+    return_raw: bool = False,
 ):
     """질의를 general / supervisor 로 분류한다.
 
     Args:
         user_query  : 사용자 발화
         model_name  : 프론트에서 고른 모델 (None 이면 기본 모델)
-        temperature : 분류는 흔들리면 안 되므로 기본 0.
-                      GeneralAgent 의 재확인에서는 0.5 로 올려 부른다.
+        temperature : 분류는 흔들리면 안 되므로 기본 0
+        return_raw  : True 면 원문·파싱결과까지 함께 돌려준다 (디버그용)
     """
     system_prompt = _prompt.router_agent_prompt().strip()
 
@@ -70,6 +81,9 @@ async def classify_route_with_llm(
     route = _util.normalize_route_label(content)
     print(f"[AGENT] router(llm) -> {route}", flush=True)
 
+    if return_raw:
+        return {"query": user_query, "route": route,
+                "raw": content, "parsed": _util.extract_json_object(content)}
     return route
 
 
@@ -82,7 +96,7 @@ def build_router_agent():
 
         route = await classify_route_with_llm(query, model_name, temperature=0.0)
 
-        # next 에는 노드 이름이 아니라 route 값이 그대로 들어간다.
+        # next 는 노드 이름이 아니라 route 값 그대로다.
         # 분기표(_builder)가 "general"/"supervisor" 를 노드로 매핑한다.
         return {
             "route": route,
@@ -98,7 +112,6 @@ router_agent = build_router_agent()
 
 # ─────────────────────────────────────────────────────────────────────────
 # GeneralAgent — 일반 대화. 업무 질의로 판명되면 supervisor 로 handoff
-#   여기도 react agent 가 아니라 prompt | llm 체인이다.
 # ─────────────────────────────────────────────────────────────────────────
 
 def build_general_agent():
@@ -115,14 +128,14 @@ def build_general_agent():
         model_name = state.get("model_name")
 
         # 제너럴에서도 한 번 더 세이프티 핸드오프 판단.
-        # 온도를 올려 라우터의 첫 판단과 다른 시각으로 보게 한다.
+        # 온도를 살짝 올려 라우터의 첫 판단과 다른 시각으로 보게 한다.
         route2 = await classify_route_with_llm(query, model_name, temperature=0.5)
 
         if route2 == "supervisor":
             print("[AGENT] general -> supervisor handoff (업무 질의로 재판정)", flush=True)
             return {"handoff": True, "route": "supervisor", "messages": []}
 
-        # 일반 대화로 확정 -> 여기서 답변을 만든다
+        # 일반 대화로 확정 -> 여기서 답변을 만든다.
         llm = _llm.get_llm(model_name, temperature=0.0)
         chain = prompt | llm
         resp = chain.invoke({"messages": messages})
@@ -131,8 +144,7 @@ def build_general_agent():
         return {
             "handoff": False,
             "route": "general",
-            "messages": [AIMessage(content=_util.message_content_to_text(resp.content),
-                                   name="GeneralAgent")],
+            "messages": [resp],
         }
 
     return _ainvoke
@@ -142,103 +154,73 @@ general_agent = build_general_agent()
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 워커 에이전트 — 전부 create_react_agent. tools 와 prompt 만 다르다.
+# 워커 에이전트들
+#   구조는 전부 동일하고 tools 만 다르다.
 # ─────────────────────────────────────────────────────────────────────────
 
-def create_extract_agent(model_name: str = None):
-    """FAB / 파라미터 추출."""
+def create_general_agent(model_name: str = None):
+    """일반 대화 + 사내 문서 RAG."""
     return create_react_agent(
-        model=_llm.get_llm(model_name=model_name, temperature=0),
+        model=_llm.get_llm(model_name, temperature=0.2),
         tools=disable_tool_caching([
-            _tool.fab_extract_tool,
-            _tool.params_extract_tool,
+            _tool.general_tool,
+            _tool.amhs_rag_tool,
         ]),
-        prompt=_prompt.extract_agent_prompt(),
+        prompt=_prompt.general_agent_prompt().strip(),
     )
 
 
 def create_status_agent(model_name: str = None):
-    """큐 / 서버 / 설비 상태, 패치 계획, 담당자 조회."""
+    """큐/서버/설비/패치 상태 조회."""
     return create_react_agent(
-        model=_llm.get_llm(model_name=model_name, temperature=0),
+        model=_llm.get_llm(model_name, temperature=0.2),
         tools=disable_tool_caching([
             _tool.queue_status_tool,
-            _tool.server_status_search_tool,
-            _tool.sys_admin_tool,
+            _tool.server_status_tool,
+            _tool.sysadmin_tool,
             _tool.patch_plan_search_tool,
             _tool.eqp_search_tool,
         ]),
-        prompt=_prompt.status_agent_prompt(),
+        prompt=_prompt.status_agent_prompt().strip(),
     )
 
 
 def create_location_agent(model_name: str = None):
-    """캐리어 현재 위치 조회."""
+    """캐리어 위치 조회."""
     return create_react_agent(
-        model=_llm.get_llm(model_name=model_name, temperature=0),
+        model=_llm.get_llm(model_name, temperature=0.2),
         tools=disable_tool_caching([
             _tool.location_search_tool,
         ]),
-        prompt=_prompt.location_agent_prompt(),
+        prompt=_prompt.location_agent_prompt().strip(),
     )
 
 
 def create_log_agent(model_name: str = None):
-    """반송 이력 / 에러 로그 분석."""
+    """반송 이력·에러 로그 분석."""
     return create_react_agent(
-        model=_llm.get_llm(model_name=model_name, temperature=0),
+        model=_llm.get_llm(model_name, temperature=0.2),
         tools=disable_tool_caching([
             _tool.log_search_tool,
         ]),
-        prompt=_prompt.log_agent_prompt(),
+        prompt=_prompt.log_agent_prompt().strip(),
     )
 
 
-def create_action_agent(model_name: str = None):
-    """명령 실행 (반송요청명령 / 목적지요청).
+def create_extract_agent(model_name: str = None):
+    """FAB/파라미터 추출.
 
-    원본에서는 다른 워커와 완전히 같은 모양이다 — HITL 도, 파라미터 수집도,
-    승인 절차도 없다. 툴을 그냥 부른다.
-    이 자리를 턴 기반 HITL 노드로 바꾸는 게 이번 작업이다.
-    (app/actions/node.py 와 비교)
+    이 에이전트는 특이하게도 Supervisor 진입 후 **가장 먼저** 실행되어
+    다른 모든 워커에 선행한다. 뒤 단계가 쓸 ID 재료를 만드는 역할이다.
     """
     return create_react_agent(
-        model=_llm.get_llm(model_name=model_name, temperature=0),
+        model=_llm.get_llm(model_name, temperature=0.2),
         tools=disable_tool_caching([
-            _tool.transport_tool,
-            _tool.dest_req_tool,
+            _tool.fab_extract_tool,
+            _tool.params_extract_tool,
         ]),
-        prompt=_prompt.action_agent_prompt(),
+        prompt=_prompt.extract_agent_prompt().strip(),
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Supervisor
-#   여기에 없다. _node.py 가 ChatPromptTemplate | llm.with_structured_output
-#   체인을 직접 만들어 돌린다. 왜 얘만 예외인지는 확인되지 않았다.
-# ─────────────────────────────────────────────────────────────────────────
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# 최종 응답 에이전트  [원본·추정 — 실물 대기]
-#   사용자가 토큰 스트리밍으로 보게 되는 건 이 둘의 출력뿐이다.
-#   사내 실물은 이보다 두껍다는 확인을 받았다(메시지 정리/재시도/폴백 등).
-#   아래는 자리만 잡아둔 최소 형태다. **실물로 덮어쓸 것.**
-# ─────────────────────────────────────────────────────────────────────────
-
-def create_final_agent(model_name: str = None):
-    """워커 결과를 받아 최종 답변. 툴 없음."""
-    return create_react_agent(
-        model=_llm.get_llm(model_name=model_name, temperature=0),
-        tools=[],
-        prompt=_prompt.final_agent_prompt(),
-    )
-
-
-def create_final_general_agent(model_name: str = None):
-    """일반 대화의 최종 답변. 툴 없음."""
-    return create_react_agent(
-        model=_llm.get_llm(model_name=model_name, temperature=0),
-        tools=[],
-        prompt=_prompt.final_general_agent_prompt(),
-    )

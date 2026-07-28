@@ -144,8 +144,7 @@ def build_general_agent():
         return {
             "handoff": False,
             "route": "general",
-            "messages": [AIMessage(content=_util.message_content_to_text(resp.content),
-                                   name="GeneralAgent")],
+            "messages": [resp],
         }
 
     return _ainvoke
