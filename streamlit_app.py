@@ -187,22 +187,18 @@ st.caption("Router → Supervisor → ExtractAgent → 워커 → FinalAnswerAge
 # 렌더 헬퍼
 # ─────────────────────────────────────────────────────────────────────────
 
-def render_trace(trace: list, expanded: bool = False, label: str = None):
+def render_trace(trace: list, expanded: bool = False):
     """노드/툴 실행 트레이스를 접이식으로.
 
-    label 에 턴의 종료 상태("완료 · FinalAnswerAgent" / "사용자 입력 대기 ⏸ · …")
-    를 받아 제목에 남긴다 — rerun 으로 status 카드가 사라져도 상태가 보이게.
-
-    카드에는 두 가지만 담는다.
-      ▶ 노드   : 어느 노드에 들어갔는지
-      - 툴    : 무엇을 어떤 입력으로 실행해 어떤 결과가 나왔는지
+    카드에 담는 것:
+      ▶ 노드              : 어느 노드에 들어갔는지
+      - 툴               : 무엇을 어떤 입력으로 실행해 어떤 결과가 나왔는지
+      ⏸ 사용자 입력 대기  : HITL 로 멈춘 턴이면 마지막 줄로 (질문 주체 표기)
     """
     if not trace:
         return
 
-    title = (f"{label} · 트레이스 {len(trace)} step" if label
-             else f"실행 트레이스 ({len(trace)} step)")
-    with st.expander(title, expanded=expanded):
+    with st.expander(f"실행 트레이스 ({len(trace)} step)", expanded=expanded):
         for line in trace:
             st.markdown(line)
 
@@ -251,8 +247,7 @@ _last = len(st.session_state.history) - 1
 for _i, turn in enumerate(st.session_state.history):
     with st.chat_message(turn["role"]):
         if turn.get("trace"):
-            render_trace(turn["trace"], expanded=(_i == _last),
-                         label=turn.get("label"))
+            render_trace(turn["trace"], expanded=(_i == _last))
         st.markdown(turn["content"])
         render_usage(turn.get("usage"))
 
@@ -369,14 +364,17 @@ def send(query: str):
         # (rerun 후에는 히스토리의 마지막 턴으로서 같은 라벨·펼침으로 다시 그려진다)
         if needs:
             asker = needs.get("agent") or "에이전트"
-            turn_label = f"사용자 입력 대기 ⏸ · {asker}"
-            status.update(label=turn_label, state="complete", expanded=True)
+            # 대기 상태를 트레이스의 마지막 줄로 남긴다 (▶ Supervisor 아래)
+            trace.append(f"⏸ **사용자 입력 대기 · {asker}**")
+            redraw_trace()
+            status.update(label=f"사용자 입력 대기 ⏸ · {asker}",
+                          state="complete", expanded=True)
             answer = needs.get("prompt", "추가 입력이 필요합니다.")
             answer_box.markdown(answer)
         else:
             # Supervisor 다음에 어느 최종 에이전트가 답했는지 라벨에 남긴다
-            turn_label = f"완료 · {final_agent}" if final_agent else "완료"
-            status.update(label=turn_label, state="complete", expanded=True)
+            label = f"완료 · {final_agent}" if final_agent else "완료"
+            status.update(label=label, state="complete", expanded=True)
 
         render_usage(usage)
 
@@ -385,7 +383,6 @@ def send(query: str):
         "content": answer,
         "trace": trace,
         "usage": usage,
-        "label": turn_label,      # 트레이스 카드 제목에 종료 상태를 남긴다
     })
     st.session_state.pending = needs
 

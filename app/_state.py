@@ -66,6 +66,7 @@ class ActionScratch(TypedDict, total=False):
     result: dict               # {job_id, status, payload}
     collect_retries: int
     validate_retries: int
+    confirm_retries: int      # 승인 재질문 횟수 (판정 불가 반복 가드)
     hops: int                  # needs 왕복 횟수
     abandon_reason: str
     last_parse_error: str

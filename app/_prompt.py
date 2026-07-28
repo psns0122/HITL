@@ -35,8 +35,9 @@ def supervisor_agent_prompt(members: list) -> str:
 - LocationAgent : 캐리어가 지금 어디 있는지 위치 조회
 - LogAgent      : 반송 이력, 에러 로그, 원인 분석
 - ActionAgent   : 반송요청명령(transport) / 목적지요청(dest_req) 등 '실행'
-- ExtractAgent  : 질문에서 FAB/파라미터 ID 추출
 - FinalAnswerAgent : 더 조회할 게 없어 답변만 하면 되는 경우
+
+(참고: ID 추출은 ExtractAgent 가 이미 자동으로 끝냈습니다. 다시 고르지 마세요.)
 
 반드시 위 이름 중 하나만 답하세요.
 """

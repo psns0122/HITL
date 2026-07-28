@@ -326,15 +326,41 @@ def _consume_confirm_answer(sc: dict, decision, config, model_name=None):
         sc["abandon_reason"] = "사용자가 실행을 거절해 명령을 종료합니다."
         return _abandon(sc)
 
-    # 판정 불가 — 승인/거절이 아니라 '파라미터를 고치려는 답변'일 수 있다.
-    # 여기서 바로 접어버리면 그때까지 수집한 값이 통째로 날아가므로,
-    # ID 후보가 실려 있으면 수집 루프로 되돌린다.
+    # 판정 불가 — 승인/거절이 아니다. 무엇을 하려는 답인지 더 본다.
+    # ① ID 후보가 실려 있으면 '파라미터 정정' 시도 (수집한 값 보존이 최우선)
+    # ② ID 가 없으면 발화 의도를 분류한다: 취소냐 / 딴 주제의 새 질문이냐
+    # ③ 둘 다 아니면 바로 접지 말고 승인 질문을 다시 던진다 (상한 있음)
     cands = id_candidates(str(decision))
     if not cands:
-        sc["phase"] = "abandoned"
-        sc["abandon_reason"] = "승인 여부를 확인하지 못해 명령을 종료합니다."
-        print(f"[ACTION confirm_verdict] 판정 불가 + ID 후보 없음 -> abandon", flush=True)
-        return _abandon(sc)
+        verdict2 = action_agent.classify_collect_answer(
+            "승인 여부", decision, sc.get("action"),
+            question="이 명령을 정말 실행할까요? (승인/거절)",
+            config=config, model_name=model_name)
+        kind = verdict2.get("kind")
+        print(f"[ACTION confirm_verdict] 판정 불가 -> 의도 분류: {kind}", flush=True)
+
+        if kind == "cancel":
+            sc["phase"] = "abandoned"
+            sc["abandon_reason"] = "사용자가 실행을 취소해 명령을 종료합니다."
+            return _abandon(sc)
+
+        if kind == "switch":
+            # 딴 주제의 새 발화. 대기 중이던 명령은 접고(실행 전이라 안전)
+            # 그 발화를 새 질문으로 처리한다 — 안 그러면 사용자의 새 질문이
+            # '승인 확인 실패' 안내에 먹혀 답을 못 받는다.
+            return _restart(str(decision), config)
+
+        # 잡담/불명 — 승인 질문을 다시 던진다. 반복되면 그때 접는다.
+        sc["confirm_retries"] = sc.get("confirm_retries", 0) + 1
+        if sc["confirm_retries"] >= cfg.MAX_VALIDATE:
+            sc["phase"] = "abandoned"
+            sc["abandon_reason"] = "승인 여부를 확인하지 못해 명령을 종료합니다."
+            print(f"[ACTION confirm_verdict] 재질문 상한 초과 -> abandon", flush=True)
+            return _abandon(sc)
+
+        print(f"[ACTION confirm_verdict] 재질문 ({sc['confirm_retries']}/{cfg.MAX_VALIDATE})",
+              flush=True)
+        return _ask_confirm(sc)
 
     ids = id_lookup_tool(cands)
     emit(config, "tool_call", {"agent": "ActionAgent", "tool": "id_lookup_tool",

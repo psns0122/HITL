@@ -217,13 +217,17 @@ def supervisor_node(state: _state.AgentState, config) -> dict:
         print(f"[WARN] Supervisor: step {step} >= {MAX_SUPERVISOR_STEPS} -> 강제 종료", flush=True)
         return {"next": "FinalAnswerAgent", "step": step + 1}
 
-    # 6) LLM/규칙 기반 배분 (사내 supervisor_chain 자리)
+    # 6) LLM 기반 배분 (사내 supervisor_chain 자리)
+    #    ExtractAgent 는 후보에서 뺀다 — 3-a 에서 이미 선행 실행됐고,
+    #    후보에 남겨두면 모델이 '추출' 설명에 끌려 계속 골라
+    #    Supervisor <-> ExtractAgent 순환이 생긴다.
     text = last_user_text(messages)
     next_node = "FinalAnswerAgent"
+    dispatchable = [m for m in members if m != "ExtractAgent"]
 
     try:
         raw_next = _agent.supervisor_agent(
-            text, members, config=config, model_name=_model_of(state))
+            text, dispatchable, config=config, model_name=_model_of(state))
 
         clean_next = str(raw_next).strip().replace("'", "").replace('"', "")
 
@@ -242,6 +246,11 @@ def supervisor_node(state: _state.AgentState, config) -> dict:
         print(f"[ERROR] Supervisor failed: {e}", flush=True)
 
     if next_node == "FINISH":
+        next_node = "FinalAnswerAgent"
+
+    # 정규화 맵을 타고 ExtractAgent 가 살아 돌아와도 차단한다 (위 순환 방지)
+    if next_node == "ExtractAgent":
+        print("[WARN] Supervisor: ExtractAgent 재배분 차단 -> FinalAnswerAgent", flush=True)
         next_node = "FinalAnswerAgent"
 
     print(f"[NODE] Supervisor -> {next_node}", flush=True)
