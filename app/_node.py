@@ -599,7 +599,7 @@ async def final_node(state: _state.AgentState, config) -> _state.AgentState:
 
     # create_final_agent 는 _ainvoke(state, config, context) 함수를 돌려준다
     out = await _agent.create_final_agent(
-        model_name=model_name or _model_of(state))(state, config, context)
+        model_name=_model_of(state))(state, config, context)
 
     msgs = out.get("messages", []) or []
 

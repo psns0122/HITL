@@ -669,7 +669,7 @@ needs-핸드오프
 
         # 값 후보 -> ID 판독기 툴로 실제 인식·검증
         if r["kind"] == "value":
-            ids = _tool.params_extract_tool.invoke({"text": r["text"]}, config=config)
+            ids = await _tool.params_extract_tool.ainvoke({"text": r["text"]}, config=config)
             pool = ids["carrier_ids"] if fieldname == "carrier_id" else ids["eqp_ids"]
 
             if pool:
@@ -718,7 +718,7 @@ needs-핸드오프
         return None
 
 
-    def _consume_confirm_answer(self, sc: dict, decision, config, model_name=None):
+    async def _consume_confirm_answer(self, sc: dict, decision, config, model_name=None):
         """승인 질문(confirm)에 대한 답변 처리.
 
         execute 로 가는 유일한 길은 명시적 approve 뿐이다.
@@ -768,7 +768,7 @@ needs-핸드오프
             return self._restart(str(decision), config)
 
         # 새 질문이 아니다 -> 파라미터 정정 시도
-        ids = _tool.params_extract_tool.invoke({"text": str(decision)}, config=config)
+        ids = await _tool.params_extract_tool.ainvoke({"text": str(decision)}, config=config)
 
         if ids["carrier_ids"] or ids["eqp_ids"]:
             # 조회되는 ID 를 줬다 -> 해당 파라미터만 교체하고 다시 검증·승인
@@ -858,7 +858,7 @@ needs-핸드오프
                         "필요하면 명령을 다시 요청해 주세요.")
                     return self._abandon(sc)
 
-                out = self._consume_confirm_answer(sc, answer, config, model_name=model_name)
+                out = await self._consume_confirm_answer(sc, answer, config, model_name=model_name)
             else:
                 out = await self._consume_param_answer(sc, answer, config, model_name=model_name,
                                                 question=awaiting.get("prompt"))
@@ -914,7 +914,7 @@ needs-핸드오프
 
                 value = None
                 if res.get("text"):
-                    ids = _tool.params_extract_tool.invoke(
+                    ids = await _tool.params_extract_tool.ainvoke(
                         {"text": res["text"]}, config=config)
                     pool = (ids["carrier_ids"] if needs["fill"] == "carrier_id"
                             else ids["eqp_ids"])
@@ -935,7 +935,7 @@ needs-핸드오프
                     print(f"[ACTION param_check] 헬퍼 실패 -> HITL 강등: {sc['last_parse_error']}", flush=True)
 
             # 1) 필수 파라미터 충족 검사
-            check = param_check_tool.invoke(
+            check = await param_check_tool.ainvoke(
                 {"action": sc.get("action") or "", "params": sc.get("params", {})},
                 config=config)
             sc["params"] = check["normalized"] or sc.get("params", {})
@@ -984,7 +984,7 @@ needs-핸드오프
             sc["phase"] = "validating"
             validate = getattr(_tool, f"{sc['action']}_validate_tool")
             print(f"[ACTION validate] enter action={sc['action']} params={sc['params']}", flush=True)
-            v = validate.invoke({"params": sc["params"]}, config=config)
+            v = await validate.ainvoke({"params": sc["params"]}, config=config)
             sc["validation"] = v
             if v["ok"]:
                 # 검증 통과 → 승인 질문 남기고 턴 종료
@@ -1012,7 +1012,7 @@ needs-핸드오프
             for bad, val in cleared.items():
                 if not val:
                     continue
-                ids = _tool.params_extract_tool.invoke({"text": str(val)},
+                ids = await _tool.params_extract_tool.ainvoke({"text": str(val)},
                                                        config=config)
                 if bad != "carrier_id" and ids["carrier_ids"]:
                     mis_slotted = True
