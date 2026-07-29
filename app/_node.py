@@ -8,8 +8,9 @@ ActionAgent 는 actions/node.py 의 턴 기반 단일 노드가 담당한다.
 """
 from typing import Annotated, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from pydantic import BaseModel, Field
 
 from app import _agent, _llm, _prompt, _state
 from app._util import (
@@ -39,6 +40,60 @@ options_lower_map = {m.lower().replace("_", "").replace("-", ""): m for m in opt
 
 class RouteResponse(TypedDict):
     next: Annotated[Literal[tuple(options_for_next)], "다음에 실행할 노드"]
+
+
+# *************  [app 전용 — origin 에 없음]  *************
+# needs-핸드오프 배분. Supervisor 소관이라 여기 둔다 (RouteResponse 와 같은 이유:
+# origin 관례가 "스키마는 그것을 쓰는 파일에" 다).
+#
+# 입력은 ActionAgent 가 넘긴 원문 세 가지뿐이다.
+#   question : ActionAgent 가 사용자에게 물은 것
+#   answer   : 사용자가 실제로 답한 것 (원문)
+#   fill     : 필요한 값의 이름
+# 로스터를 보고 LLM 이 (1) 풀어 줄 워커와 (2) 그 워커에게 보낼 질의문을 고른다.
+# 확신이 없으면 NONE — 그러면 사용자에게 직접 다시 묻는다.
+#
+# 워커를 새로 붙일 때 할 일은 로스터 프롬프트에 설명 한 줄을 더하는 것뿐이다.
+# ActionAgent 도, 워커 본문도 건드리지 않는다.
+
+class DispatchOut(BaseModel):
+    agent: str = Field("NONE", description="도와줄 워커 이름. 없으면 NONE")
+    query: str = Field("", description="그 워커에게 보낼 한 문장 질의")
+
+
+def needs_dispatch(needs: dict, members: list, config=None,
+                   model_name: str = None) -> dict:
+    """상담 요청을 받아 도와줄 워커와 질의문을 고른다.
+
+    반환: {"agent": 워커명 or None, "query": 질의문 or None}
+    """
+    answer = str(needs.get("answer") or "")
+
+    try:
+        out = _llm.structured_invoke(
+            _llm.get_llm(model_name, temperature=0.0),
+            DispatchOut,
+            [
+                SystemMessage(content=_prompt.needs_dispatch_prompt(members).strip()),
+                HumanMessage(content=(
+                    f"ActionAgent 가 사용자에게 물은 것: {needs.get('question')}\n"
+                    f"사용자의 답변(원문): {answer}\n"
+                    f"필요한 값: {needs.get('fill')}\n"
+                    f"지금까지 확정된 파라미터: {needs.get('params')}"
+                )),
+            ],
+            config=config,
+        )
+        agent = out.agent if out.agent in members else None
+        query = out.query or (answer if agent else None)
+        print(f"[AGENT] needs_dispatch(llm) -> {agent} query='{query}'", flush=True)
+        return {"agent": agent, "query": query}
+
+    except Exception as e:
+        print(f"[AGENT] needs_dispatch llm 실패({e}) -> NONE (사용자에게 직접 질문)",
+              flush=True)
+        return {"agent": None, "query": None}
+# *************
 
 
 # 프롬프트 본문에 중괄호가 들어 있으면 ChatPromptTemplate 이 변수로 오인한다.
@@ -79,7 +134,7 @@ MAX_SUPERVISOR_STEPS = 12
 # ActionAgent 는 "내가 이렇게 물었고(question) / 사용자가 이렇게 답했고
 # (answer) / 나는 이 값이 필요하다(fill)" 원문만 넘긴다. 어느 워커가 그걸
 # 풀 수 있는지는 Supervisor 가 평소 배분에 쓰는 것과 같은 로스터(members +
-# 프롬프트의 워커 설명)를 보고 LLM 으로 판단한다(_agent.needs_dispatch).
+# 프롬프트의 워커 설명)를 보고 LLM 으로 판단한다(이 파일의 needs_dispatch).
 #
 # 그래서 워커를 새로 붙이면 — 로스터 프롬프트에 한 줄 설명을 더하는 순간 —
 # needs 상담 대상에도 자동으로 편입된다. ActionAgent 는 아무것도 몰라도 된다.
@@ -197,7 +252,7 @@ async def supervisor_node(state: _state.AgentState, config) -> dict:
         #      fill=eqp_id 라는 말에 끌려 "ID 추출" 로 오해하고 그걸 골라,
         #      아무것도 못 찾은 채 상담 왕복만 한 번 낭비한다(실측).
         helpers = [m for m in members if m != "ExtractAgent"]
-        d = _agent.needs_dispatch(needs, helpers,
+        d = needs_dispatch(needs, helpers,
                                   config=config, model_name=_model_of(state))
         nxt = d.get("agent")
 

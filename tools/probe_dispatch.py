@@ -14,8 +14,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import _agent, _prompt
-from app._node import members
+from app import _prompt
+from app import _node as _agent
+members = _agent.members
 
 N = 3
 HELPERS = [m for m in members if m != "ExtractAgent"]

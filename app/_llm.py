@@ -165,8 +165,22 @@ warnings.filterwarnings("ignore",
                         message="Pydantic serializer warnings",
                         category=UserWarning)
 
-# 구조화 출력 헬퍼는 두지 않는다. origin 이 그렇듯 호출부가
-# `llm.with_structured_output(스키마, method="json_mode")` 를 직접 쓴다.
-# (origin 선례: _node.RouteResponse)
+def structured_invoke(llm, schema, messages, config=None):
+    """구조화 출력 (판단용). 실패 시 예외를 그대로 올려 호출부가 폴백한다.
+
+    origin 에는 이 헬퍼가 없다 — 유일한 구조화 출력이던 `_node.RouteResponse`
+    한 곳에서 `with_structured_output(..., method="json_mode")` 를 인라인으로
+    쓴다. app 은 판단 지점이 여러 곳이라 헬퍼를 하나 둔다. 대신 **헬퍼는 이
+    하나뿐이다** — 파일마다 비슷한 걸 또 만들지 말 것.
+
+    method 를 지정하지 않는 이유:
+      json_mode 는 "유효한 JSON 인가" 만 보장하고 **스키마를 모델에 보내지
+      않는다.** 필드 설명도 값 제약도 전달되지 않아, 필드가 여럿인 판단에서는
+      값이 서로 뒤바뀐다(실측: 옮길 캐리어와 기준 캐리어가 뒤집혔다).
+      origin 이 json_mode 로 충분했던 건 그 스키마의 필드가 next 하나여서다.
+      Supervisor 쪽은 origin 그대로 json_mode 를 쓰고, 여기만 기본 경로를 쓴다.
+    """
+    runner = llm.with_structured_output(schema)
+    return runner.invoke(messages, config=config)
 
 # *************  [app 전용 끝]  *************

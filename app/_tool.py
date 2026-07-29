@@ -254,12 +254,20 @@ def params_extract_tool(text: str) -> dict:
 
 # ── 1. (공용) param_check_tool ────────────────────────────────────────────
 
-def param_check_tool(action: str | None, params: dict) -> dict:
-    """의도별 필수 파라미터 충족 여부 확인. 미충족 -> HITL 루프의 근거가 된다."""
+@tool
+def param_check_tool(action: str, params: dict) -> dict:
+    """명령(action)의 필수 파라미터가 params 에 다 있는지 확인한다.
+
+    action  : 실행하려는 명령 이름 (transport / dest_req / ...). 모르면 빈 문자열.
+    params  : 지금까지 파악한 파라미터. 예: {"carrier_id": "6PDMQ283"}
+
+    반환 missing 에 비어 있는 필수 파라미터 이름이 담긴다. 선택 파라미터는
+    비어 있어도 missing 에 들지 않는다. missing 이 비어야 검증으로 넘어갈 수 있다.
+    """
     from app import _prompt   # 액션 선언은 프롬프트 계층 소유
 
     print(f"[TOOL param_check] enter action={action} params={params}", flush=True)
-    if not action:
+    if not action or action not in _prompt.action_catalog():
         print(f"[TOOL param_check] action 미확정 -> missing=['action']", flush=True)
         return {"satisfied": False, "missing": ["action"], "normalized": dict(params or {})}
 
@@ -273,6 +281,7 @@ def param_check_tool(action: str | None, params: dict) -> dict:
 
 # ── 2. validation tools (액션별) ──────────────────────────────────────────
 
+@tool
 def transport_validate_tool(params: dict) -> dict:
     """반송요청 유효성: 캐리어 존재 / 목적지 존재·온라인 / 현재 위치에서 도달 가능."""
     print(f"[TOOL transport_validate] enter params={params}", flush=True)
@@ -309,6 +318,7 @@ def transport_validate_tool(params: dict) -> dict:
     return {"ok": True, "code": "OK", "bad_fields": [], "reason": ""}
 
 
+@tool
 def dest_req_validate_tool(params: dict) -> dict:
     """목적지요청 유효성: 캐리어 존재 / 요청 가능 상태(정책 목록 보유)."""
     print(f"[TOOL dest_req_validate] enter params={params}", flush=True)
@@ -334,6 +344,7 @@ def dest_req_validate_tool(params: dict) -> dict:
 # ── 3. 안내문(확인 질문) tools (액션별) ───────────────────────────────────
 
 def transport_confirm_tool(params: dict) -> str:
+    """반송요청명령의 승인 질문 문구. 턴을 닫을 때 ActionService 가 부른다."""
     print(f"[TOOL transport_confirm] enter params={params}", flush=True)
     carrier_id = params.get("carrier_id", "?")
     eqp_id = params.get("eqp_id", "?")
@@ -347,6 +358,7 @@ def transport_confirm_tool(params: dict) -> str:
 
 
 def dest_req_confirm_tool(params: dict) -> str:
+    """목적지요청의 승인 질문 문구. 턴을 닫을 때 ActionService 가 부른다."""
     print(f"[TOOL dest_req_confirm] enter params={params}", flush=True)
     carrier_id = params.get("carrier_id", "?")
     policy = mock_db.get_dest_policy(carrier_id)

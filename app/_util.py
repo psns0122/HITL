@@ -8,11 +8,15 @@ import re
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-# *************  [app 전용 import — ActionService 가 쓴다]  *************
+# *************  [app 전용 import — 판단부와 ActionService 가 쓴다]  *************
 import time
+from typing import Literal
+
+from langchain_core.messages import SystemMessage
+from pydantic import BaseModel, Field, create_model
 
 import app.config as cfg
-from app import _prompt, _tool
+from app import _llm, _prompt, _tool
 from app._state import AgentState
 from app._tool import param_check_tool
 # *************
@@ -195,8 +199,8 @@ def normalize_route_label(content: str) -> str:
 
 
 # *************  [app 전용 — origin 에 없음]  *************
-# ActionAgent 서비스 — 턴 기반 HITL 상태기계 본체.
-# _node.action_node 가 여기 위임한다. 원 설계 설명은 클래스 도크스트링 참고.
+# ActionAgent — 판단부 + 턴 기반 HITL 상태기계.
+# _node.action_node 가 여기 위임한다. 원 설계 설명은 ActionService 도크스트링.
 
 # 진행 중으로 취급하는 phase (재진입 판정 기준)
 ACTIVE_PHASES = {"param_check", "collecting", "awaiting_helper", "validating", "confirming"}
@@ -205,10 +209,219 @@ ACTIVE_PHASES = {"param_check", "collecting", "awaiting_helper", "validating", "
 MAX_LOOP_TURNS = 40
 
 
-def _action_agent():
-    """판단 에이전트 지연 로더 — _agent 가 _util 을 import 하므로 순환 회피."""
-    from app._agent import action_agent
-    return action_agent
+# ─────────────────────────────────────────────────────────────────────────
+# 판단 (LLM)
+#
+# 사내 규칙: 판단은 전부 LLM 이 한다.
+#   run_action_agent        : 명령·파라미터 판단 — react agent 가 툴을 직접 부른다
+#   classify_collect_answer : 파라미터 질문에 대한 답변의 종류
+#   classify_confirm        : 승인 판정
+# ActionService 는 이 결과에 따라 흐름만 잡는다. 실패하면 값을 지어내지 않고
+# 안전한 쪽(재질문 / 미승인)으로 떨어진다.
+# 예외: ID 인식은 LLM 이 아니라 판독기 툴(params_extract_tool)의 DB 조회다.
+# ─────────────────────────────────────────────────────────────────────────
+
+class CollectAnswerOut(BaseModel):
+    """파라미터 질문에 대한 답변의 종류. 명령 종류와 무관하게 고정이다."""
+    kind: Literal["value", "consult", "switch", "cancel", "empty"] = Field(
+        description="답변이 무엇을 하려는 것인지")
+
+
+class ConfirmOut(BaseModel):
+    """승인 질문에 대한 판정."""
+    verdict: Literal["approve", "reject", "unclear"] = Field(
+        description="실행 승인 여부")
+
+
+async def run_action_agent(text: str, config=None, model_name: str = None) -> dict:
+    """react agent(_agent.create_action_agent)를 돌려 명령과 파라미터를 판단한다.
+
+    반환: {"action": str|None, "params": dict}
+
+    에이전트는 프롬프트가 가르친 순서대로 params_extract -> param_check ->
+    validate 툴을 직접 호출한다. 여기서는 그 대화에서 **마지막
+    param_check_tool 호출의 인자**를 읽는다 — 그것이 에이전트가 판단한
+    명령(action)과 파라미터(params)다. 툴 호출 인자는 구조화된 dict 라서
+    자유 텍스트 답변을 파싱하는 것보다 훨씬 안전하다.
+
+    param_check 호출이 아예 없으면(에이전트가 헛돌았으면) 명령 불명으로
+    돌려주고, ActionService 가 사용자에게 되묻는다.
+    """
+    from app._agent import create_action_agent   # _agent 가 _util 을 import — 순환 회피
+
+    def _made_tool_calls(result) -> bool:
+        return any((getattr(m, "tool_calls", None) or [])
+                   for m in result.get("messages", []))
+
+    try:
+        agent = create_action_agent(model_name=model_name)
+        out = await agent.ainvoke({"messages": [HumanMessage(content=text)]},
+                                  config=config)
+
+        # 모델이 툴을 하나도 안 부르고 텍스트로만 답하는 턴이 가끔 있다(실측).
+        # 판단 근거가 없으니 1회만 다시 돌린다 — 최종 응답의 빈 응답 재시도와
+        # 같은 선례다. 두 번째도 안 부르면 불명으로 떨어져 사용자에게 묻는다.
+        if not _made_tool_calls(out):
+            # 재시도는 같은 요청 + 지시 한 줄. 발화에 '로그 분석' 같은 말이
+            # 섞이면 모델이 자기에게 없는 도구를 텍스트로 흉내 내다 깨지는
+            # 일이 있어(실측: 최종 답변이 "{" 한 글자), 가진 도구만 쓰라고
+            # 못 박아 다시 시킨다.
+            print("[AGENT] run_action_agent: 툴 호출 없음 -> 1회 재시도", flush=True)
+            nudge = ("반드시 도구를 호출해서 처리하라. 너에게 있는 도구는 "
+                     "params_extract_tool / param_check_tool / "
+                     "transport_validate_tool / dest_req_validate_tool 뿐이다. "
+                     "로그 분석이나 위치 조회는 네 일이 아니다 — 그런 값은 "
+                     "비워 두고 param_check 까지만 하라.")
+            out = await agent.ainvoke(
+                {"messages": [HumanMessage(content=text),
+                              HumanMessage(content=nudge)]},
+                config=config)
+
+        # 1순위: param_check_tool 호출 인자. 에이전트가 순서를 건너뛰고
+        # {action}_validate_tool 부터 부르는 일이 있어(실측: qwen2.5 가
+        # dest_req 발화에서 그랬다) validate 호출도 같은 근거로 읽는다 —
+        # 그 툴을 골랐다는 것 자체가 에이전트의 명령 판단이다.
+        action, params = None, {}
+        catalog = _prompt.action_catalog()
+        for msg in out.get("messages", []):
+            for tc in (getattr(msg, "tool_calls", None) or []):
+                name = tc.get("name") or ""
+                args = tc.get("args") or {}
+                if name == "param_check_tool":
+                    action = (args.get("action") or "").strip() or None
+                    params = {k: str(v).strip() for k, v in (args.get("params") or {}).items()
+                              if v and str(v).strip()}
+                elif name.endswith("_validate_tool"):
+                    guessed = name[:-len("_validate_tool")]
+                    if guessed in catalog:
+                        action = guessed
+                        params = {k: str(v).strip() for k, v in (args.get("params") or {}).items()
+                                  if v and str(v).strip()}
+
+        # 모델이 툴 호출을 정식 tool_call 이 아니라 텍스트 JSON 으로 뱉는
+        # 일이 있다(실측: 최종 답변이 '{"name": "param_check_tool", ...}').
+        # 직렬화만 다를 뿐 같은 판단이므로 그것도 읽는다.
+        if not action:
+            for msg in out.get("messages", []):
+                pseudo = extract_json_object(
+                    message_content_to_text(getattr(msg, "content", "")))
+                if pseudo.get("name") == "param_check_tool":
+                    args = pseudo.get("arguments") or pseudo.get("args") or {}
+                    action = (args.get("action") or "").strip() or action
+                    got = {k: str(v).strip() for k, v in (args.get("params") or {}).items()
+                           if v and str(v).strip()}
+                    params = got or params
+
+        # 에이전트가 카탈로그에 없는 명령을 지어냈으면 불명 처리
+        if action and action not in _prompt.action_catalog():
+            print(f"[AGENT] run_action_agent: 모르는 명령 {action!r} -> 불명", flush=True)
+            action = None
+
+        # 그래도 명령이 비었으면, 같은 프롬프트로 명령 하나만 강제 구조화
+        # 출력으로 다시 묻는다. 자유 툴 호출은 흔들려도 tool_choice 를 고정한
+        # 구조화 출력은 안정적이다(실측). 판단 주체는 그대로 LLM 이다.
+        if not action:
+            names = tuple(_prompt.action_catalog().keys()) + ("unknown",)
+            PickOut = create_model(
+                "PickOut",
+                action=(Literal[names],
+                        Field(description="사용자가 요구한 명령. 모르면 unknown")))
+            pick = _llm.structured_invoke(
+                _llm.get_llm(model_name, temperature=0.0), PickOut,
+                [SystemMessage(content=_prompt.action_agent_prompt().strip()),
+                 HumanMessage(content=f"""아래 발화가 요구하는 명령 이름 하나만 답하라. 모르면 unknown.
+발화: {text}""")],
+                config=config)
+            if pick.action != "unknown":
+                action = pick.action
+                print(f"[AGENT] run_action_agent: 구조화 폴백 -> {action}", flush=True)
+
+        # 에이전트의 마지막 답변(검증 결과 요약) — 승인 질문에 재활용한다.
+        # qwen 계열이 섞어 내는 <think> 블록은 사용자에게 보일 글이 아니므로 걷어낸다.
+        final_text = ""
+        msgs = out.get("messages", [])
+        if msgs:
+            final_text = message_content_to_text(getattr(msgs[-1], "content", ""))
+            final_text = re.sub(r"<think>.*?</think>", "", final_text,
+                                flags=re.DOTALL).strip()
+
+        r = {"action": action, "params": params, "final_text": final_text}
+        print(f"[AGENT] run_action_agent -> action={action} params={params} "
+              f"summary={len(final_text)}자", flush=True)
+        return r
+
+    except Exception as e:
+        # 추측하지 않는다 — 되묻는 게 안전하다
+        print(f"[AGENT] run_action_agent 실패({e}) -> 불명 (사용자에게 묻는다)", flush=True)
+        return {"action": None, "params": {}, "final_text": ""}
+
+
+def classify_collect_answer(fieldname: str, answer, current_action: str | None,
+                            question: str = None, config=None,
+                            model_name: str = None) -> dict:
+    """파라미터 질문에 대한 사용자 답변을 분류한다.
+
+    반환: {"kind": value|consult|switch|cancel|empty, "text"/"note"...}
+    """
+    text = str(answer or "")
+
+    # /chat/stop 등이 보내는 기계 센티널 — 모델에 물을 것도 없다
+    if isinstance(answer, dict) and answer.get("aborted"):
+        return {"kind": "cancel"}
+
+    try:
+        out = _llm.structured_invoke(
+            _llm.get_llm(model_name, temperature=0.0),
+            CollectAnswerOut,
+            [SystemMessage(content=_prompt.action_collect_answer_prompt().strip()),
+             HumanMessage(content=f"""진행 중인 명령: {current_action or '아직 정해지지 않음'}
+사용자에게 물어본 것: {question or fieldname}
+지금 받아야 하는 값: {fieldname}
+사용자의 답변(원문): {text}""")],
+            config=config)
+        print(f"[AGENT] classify_collect_answer(llm) -> {out.kind}", flush=True)
+
+        if out.kind == "cancel":
+            return {"kind": "cancel"}
+        if out.kind == "consult":
+            return {"kind": "consult", "text": text}
+        if out.kind == "switch":
+            return {"kind": "switch", "text": text}
+        if out.kind == "value":
+            return {"kind": "value", "text": text}
+        return {"kind": "empty", "note": f"답변에서 {fieldname} 값을 찾지 못했습니다."}
+
+    except Exception as e:
+        # 추측하지 않는다 — 다시 묻는 게 가장 안전하다
+        print(f"[AGENT] classify_collect_answer llm 실패({e}) -> 재질문", flush=True)
+        return {"kind": "empty", "note": "답변을 이해하지 못했습니다. 다시 알려주세요."}
+
+
+def classify_confirm(answer, action: str = None, params: dict = None,
+                     config=None, model_name: str = None) -> str:
+    """승인 질문에 대한 답변 판정 -> approve | reject | unclear."""
+    # /chat/stop 등이 보내는 기계 센티널 — 모델에 물을 것도 없다
+    if isinstance(answer, dict):
+        if answer.get("aborted"):
+            return "reject"
+        if "approved" in answer:
+            return "approve" if answer["approved"] else "reject"
+
+    try:
+        out = _llm.structured_invoke(
+            _llm.get_llm(model_name, temperature=0.0),
+            ConfirmOut,
+            [SystemMessage(content=_prompt.action_confirm_prompt().strip()),
+             HumanMessage(content=f"""실행하려는 명령: {action or '?'} (파라미터: {params})
+사용자의 답변(원문): {answer}""")],
+            config=config)
+        print(f"[AGENT] classify_confirm(llm) -> {out.verdict}", flush=True)
+        return out.verdict
+
+    except Exception as e:
+        # 실행은 위험하다 — 판정 못 하면 절대 승인하지 않는다
+        print(f"[AGENT] classify_confirm llm 실패({e}) -> unclear (미승인)", flush=True)
+        return "unclear"
 
 
 class ActionService:
@@ -217,7 +430,7 @@ class ActionService:
 판단과 흐름의 분리 (사내 규칙)
 -----------------------------
 이 노드는 판단하지 않는다. 의도 추출·답변 분류·승인 판정 같은 결정은 전부
-action_node 가 가진 에이전트(_agent.action_agent)가 LLM 으로 한다. 노드는
+위의 판단 함수들(run_action_agent 등)이 LLM 으로 한다. 노드는
 그 결과에 따라 수집 루프를 돌리고 턴을 닫는 흐름만 담당한다.
 (LLM 호출이 실패하면 값을 지어내지 않고 "다시 물어본다" 는 안전한 기본값으로
  떨어진다. 예외는 ID 인식 — 이것은 LLM 판단이 아니라 판독기 툴의 DB 조회다.)
@@ -295,9 +508,20 @@ needs-핸드오프
 
 
     def _ask_confirm(self, sc: dict) -> dict:
-        """⏸ HITL #2 — 실행 직전 최종 승인 질문을 남기고 턴을 끝낸다."""
-        # 툴 바인딩은 네이밍 규칙 — _tool.py 의 {action}_confirm_tool
-        guidance = getattr(_tool, f"{sc['action']}_confirm_tool")(sc["params"])
+        """⏸ HITL #2 — 실행 직전 최종 승인 질문을 남기고 턴을 끝낸다.
+
+        질문 머리말은 이번 턴 에이전트가 쓴 검증 요약을 재활용한다(LLM 서술).
+        단 사용자가 승인하는 근거인 파라미터 명세는 코드가 sc["params"] 에서
+        직접 박는다 — 요약이 틀려도 이 줄들이 진실이다. 에이전트가 안 돈
+        턴(수집 후 재검증, 승인 재질문)은 {action}_confirm_tool 템플릿 폴백.
+        """
+        summary = (sc.pop("agent_summary", "") or "").strip()
+        if summary:
+            param_lines = "\n".join(f"- {k}: {v}" for k, v in sc["params"].items())
+            guidance = f"{summary}\n{param_lines}\n이 명령을 정말 실행할까요? (승인/거절)"
+        else:
+            # 툴 바인딩은 네이밍 규칙 — _tool.py 의 {action}_confirm_tool
+            guidance = getattr(_tool, f"{sc['action']}_confirm_tool")(sc["params"])
 
         sc["awaiting"] = {
             "type": "confirm",
@@ -331,7 +555,8 @@ needs-핸드오프
 
     def _execute_and_finalize(self, sc: dict, config) -> dict:
         """진짜 액션 수행 — 명시적 승인 이후에만 도달하는 유일한 side-effect 지점."""
-        label = _prompt.action_catalog()[sc["action"]]["label"]
+        catalog = _prompt.action_catalog()
+        label = catalog[sc["action"]]["label"] if sc.get("action") in catalog else "명령"
         print(f"[ACTION execute] enter action={sc['action']} params={sc['params']}", flush=True)
         result = getattr(_tool, f"{sc['action']}_execute_tool")(sc["params"])
         sc["result"] = result
@@ -395,17 +620,17 @@ needs-핸드오프
     #   반환값이 dict 면 그대로 턴 종료(abandon/restart), None 이면 수집 루프 계속
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _consume_param_answer(self, sc: dict, answer, config, model_name=None, question=None):
+    async def _consume_param_answer(self, sc: dict, answer, config, model_name=None, question=None):
         """수집 질문(collect_param)에 대한 답변 처리.
 
         분기: 취소 / 맥락이탈(재시작) / 상담 / 액션선택 / 값 / 재질문
-        ★ 판단은 노드가 하지 않는다 — action_agent(LLM)가 분류하고,
+        ★ 판단은 노드가 하지 않는다 — classify_collect_answer(LLM)가 분류하고,
           노드는 그 결과에 따라 흐름만 잡는다.
         """
         fieldname = sc.get("pending_field")
         print(f"[ACTION merge_param] enter field={fieldname}", flush=True)
 
-        r = _action_agent().classify_collect_answer(
+        r = classify_collect_answer(
             fieldname, answer, sc.get("action"),
             question=question, config=config, model_name=model_name)
 
@@ -426,10 +651,20 @@ needs-핸드오프
             print(f"[ACTION merge_param] 상담형 답변 -> '{r['text']}'", flush=True)
             return None
 
-        # 액션 선택 (action 을 묻던 중)
-        if r["kind"] == "action":
-            sc["action"] = r["value"]
-            print(f"[ACTION merge_param] 액션 선택 -> {r['value']}", flush=True)
+        # 액션 선택 (action 을 묻던 중) — 답을 에이전트에 다시 태워
+        # 어느 명령인지 고르게 한다. 파라미터가 함께 실려 있으면 흡수한다.
+        if r["kind"] == "value" and fieldname == "action":
+            r2 = await run_action_agent(r["text"], config=config, model_name=model_name)
+            if r2["action"]:
+                sc["action"] = r2["action"]
+                sc["agent_summary"] = r2["final_text"]
+                for k, v in r2["params"].items():
+                    sc["params"].setdefault(k, v.upper())
+                print(f"[ACTION merge_param] 액션 선택 -> {r2['action']}", flush=True)
+                return None
+            sc["collect_retries"] = sc.get("collect_retries", 0) + 1
+            sc["last_parse_error"] = "답변에서 명령을 알아내지 못했습니다."
+            print(f"[ACTION merge_param] 액션 불명 재질문({sc['collect_retries']})", flush=True)
             return None
 
         # 값 후보 -> ID 판독기 툴로 실제 인식·검증
@@ -490,7 +725,7 @@ needs-핸드오프
         반환값이 dict 면 턴 종료(실행완료/abandon), None 이면 수집 루프로 복귀
         (파라미터 정정). ★ 판정은 action_agent(LLM)가 한다.
         """
-        verdict = _action_agent().classify_confirm(
+        verdict = classify_confirm(
             decision, action=sc.get("action"), params=sc.get("params"),
             config=config, model_name=model_name)
         print(f"[ACTION confirm_verdict] decision={decision!r} -> {verdict}", flush=True)
@@ -514,7 +749,7 @@ needs-핸드오프
         #    오인해 캐리어를 갈아끼운다. 그래서 의도 분류가 정정 시도보다 먼저다.
         # ② 새 질문이 아니면 ID 후보로 '파라미터 정정' 을 시도한다 (값 보존 우선)
         # ③ 둘 다 아니면 바로 접지 말고 승인 질문을 다시 던진다 (상한 있음)
-        verdict2 = _action_agent().classify_collect_answer(
+        verdict2 = classify_collect_answer(
             "승인 여부", decision, sc.get("action"),
             question="이 명령을 정말 실행할까요? (승인/거절)",
             config=config, model_name=model_name)
@@ -625,7 +860,7 @@ needs-핸드오프
 
                 out = self._consume_confirm_answer(sc, answer, config, model_name=model_name)
             else:
-                out = self._consume_param_answer(sc, answer, config, model_name=model_name,
+                out = await self._consume_param_answer(sc, answer, config, model_name=model_name,
                                                 question=awaiting.get("prompt"))
 
             if out is not None:
@@ -638,26 +873,30 @@ needs-핸드오프
             sc.pop("awaiting", None)
 
         else:
-            # 신규 진입 -> 의도/파라미터/참조 추출
+            # 신규 진입 -> 의도/파라미터 추출
             text = last_user_text(msgs)
             print(f"[ACTION entry] 신규 진입", flush=True)
             print(f"[ACTION infer_intent] enter text='{text}'", flush=True)
             emit(config, "agent_status", {"agent": "ActionAgent", "detail": "신규 진입"})
-            r = _action_agent().extract_intent(text, config=config, model_name=model_name)
+            r = await run_action_agent(text, config=config, model_name=model_name)
             sc = {
                 "action": r["action"],
                 "phase": "param_check",
+                # 에이전트가 쓴 검증 요약 — 이번 턴이 승인 질문으로 끝나면 재활용
+                "agent_summary": r["final_text"],
                 "params": {k: v.upper() for k, v in r["params"].items()},
                 "missing": [],
-                # 발화에 값이 간접적으로 실린 것 같으면(참조 신호) 원문을 들고
-                # Supervisor 상담 후보로 둔다. 누가 풀어줄지는 여기서 모른다.
-                "consult_text": text if r["reference"] else None,
+                # 필수값이 비면 원문을 들고 무조건 Supervisor 상담부터 간다.
+                # 발화에 간접 표현("~있는 위치로", "로그 분석해서")이 실렸는지,
+                # 누가 풀 수 있는지는 전부 Supervisor(needs_dispatch)가 판단한다.
+                # 단서가 없으면 NONE 으로 반송되고 사용자에게 직접 묻는다.
+                "consult_text": text,
                 "collect_retries": 0,
                 "validate_retries": 0,
                 "hops": 0,
             }
-            print(f"[ACTION infer_intent] -> action={r['action']} params={sc['params']} "
-                  f"consult={bool(r['reference'])}", flush=True)
+            print(f"[ACTION infer_intent] -> action={r['action']} params={sc['params']}",
+                  flush=True)
 
         # ── 수집/검증 루프 (구 param_check <-> validate) ────────────────────
         for _ in range(MAX_LOOP_TURNS):
@@ -696,13 +935,11 @@ needs-핸드오프
                     print(f"[ACTION param_check] 헬퍼 실패 -> HITL 강등: {sc['last_parse_error']}", flush=True)
 
             # 1) 필수 파라미터 충족 검사
-            check = param_check_tool(sc.get("action"), sc.get("params", {}))
+            check = param_check_tool.invoke(
+                {"action": sc.get("action") or "", "params": sc.get("params", {})},
+                config=config)
             sc["params"] = check["normalized"] or sc.get("params", {})
             sc["missing"] = check["missing"]
-            emit(config, "tool_call", {"agent": "ActionAgent", "tool": "param_check_tool",
-                                       "args": {"action": sc.get("action"), "params": sc["params"]},
-                                       "result": {"missing": sc["missing"]}})
-
             # 2) 상담 요청 → Supervisor 에게 (needs-핸드오프)
             #
             # 사용자의 답변(또는 최초 발화)에 필요한 값이 간접적으로 실려 있는데
@@ -711,15 +948,19 @@ needs-핸드오프
             # 강등한다.
             consult = sc.get("consult_text")
             if consult and sc["missing"]:
-                if sc.get("hops", 0) >= cfg.MAX_HOPS:
+                if sc["missing"][0] == "action":
+                    # 명령 종류는 동료 워커가 조회해 줄 수 있는 값이 아니다 —
+                    # 사용자의 의도다. 상담 없이 바로 사용자에게 고르게 한다.
+                    # (안 막으면 헬퍼의 자연어 답에서 판독기가 꺼낸 엉뚱한 ID 가
+                    #  params["action"] 에 들어간다 — 실측)
+                    print(f"[ACTION param_check] action 미확정은 상담 대상 아님 -> 직접 질문", flush=True)
+                    sc.pop("consult_text", None)
+                elif sc.get("hops", 0) >= cfg.MAX_HOPS:
                     print(f"[ACTION param_check] MAX_HOPS({cfg.MAX_HOPS}) 초과 -> 상담 포기, 직접 질문", flush=True)
                     sc.pop("consult_text", None)
                 else:
                     fill = sc["missing"][0]
-                    if sc.get("action") and fill != "action":
-                        question = _prompt.action_catalog()[sc["action"]]["param_prompts"].get(fill, "")
-                    else:
-                        question = _prompt.action_select_prompt()
+                    question = _prompt.action_catalog()[sc["action"]]["param_prompts"].get(fill, "")
                     sc["needs"] = {"fill": fill, "question": question,
                                    "answer": sc.pop("consult_text"),
                                    "params": dict(sc.get("params") or {})}
@@ -743,11 +984,8 @@ needs-핸드오프
             sc["phase"] = "validating"
             validate = getattr(_tool, f"{sc['action']}_validate_tool")
             print(f"[ACTION validate] enter action={sc['action']} params={sc['params']}", flush=True)
-            v = validate(sc["params"])
+            v = validate.invoke({"params": sc["params"]}, config=config)
             sc["validation"] = v
-            emit(config, "tool_call", {"agent": "ActionAgent", "tool": f"{sc['action']}_validate_tool",
-                                       "args": sc["params"], "result": {"ok": v["ok"], "code": v["code"]}})
-
             if v["ok"]:
                 # 검증 통과 → 승인 질문 남기고 턴 종료
                 sc["phase"] = "confirming"
@@ -761,8 +999,25 @@ needs-핸드오프
                 return self._abandon(sc)
 
             # 문제가 된 파라미터만 비우고 재수집 (수렴 보장 지점)
-            for bad in v.get("bad_fields", []):
-                sc["params"].pop(bad, None)
+            cleared = {bad: sc["params"].pop(bad, None)
+                       for bad in v.get("bad_fields", [])}
+            # 검증에서 튕긴 값은 대개 발화에서 '직접 읽어서' 넣었던 값이라,
+            # 그 발화를 들고 다시 Supervisor 상담을 가 봐야 캘 것이 없다.
+            # 상담 후보를 비우고 사유와 함께 사용자에게 직접 묻는다.
+            # 단 예외 하나 — 튕긴 값이 실은 '존재하는 캐리어 ID' 면
+            # ("A 를 B 있는 위치로" 의 B 를 에이전트가 eqp_id 에 잘못 꽂은 것)
+            # 간접 표현이 남아 있다는 신호이므로 상담을 유지한다.
+            # 이 구분은 판단이 아니라 판독기 툴의 DB 조회다.
+            mis_slotted = False
+            for bad, val in cleared.items():
+                if not val:
+                    continue
+                ids = _tool.params_extract_tool.invoke({"text": str(val)},
+                                                       config=config)
+                if bad != "carrier_id" and ids["carrier_ids"]:
+                    mis_slotted = True
+            if not mis_slotted:
+                sc.pop("consult_text", None)
             sc["last_parse_error"] = f"검증 실패: {v['reason']}"
             sc["phase"] = "param_check"
             print(f"[ACTION validate] FAIL({v['code']}) -> {v.get('bad_fields')} 비우고 재수집", flush=True)

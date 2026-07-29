@@ -12,8 +12,11 @@
   ActionAgent     : 명령 실행 (HITL — _util.ActionService 가 담당)
   FinalAnswerAgent / FinalGeneralAgent : 최종 응답 생성(스트리밍)
 
-파일 구성: 위쪽은 origin/_agent.py 와 같고, ActionAgent 판단부는 파일 맨 아래
-`[app 전용]` 블록에 모여 있다. 이식할 때는 그 블록만 들고 가면 된다.
+파일 구성: origin/_agent.py 와 거의 같다. app 추가분은 ************* 로 표시하고
+파일 맨 아래 `[app 전용]` 블록에 모아 두었다 (지금은 스트리밍 헬퍼 하나뿐).
+
+ActionAgent 판단부는 `_util.py`, needs-핸드오프 배분은 `_node.py` 에 있다 —
+origin 관례대로 "스키마는 그것을 쓰는 파일에" 두었다.
 """
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
@@ -225,12 +228,35 @@ def create_extract_agent(model_name: str = None):
     )
 
 
-# *************  [app — origin 의 create_action_agent 는 여기 없다]  *************
-# origin 은 이 자리에서 transport_tool / dest_req_tool 을 붙인 react agent 를
-# 만들었다. HITL 은 react 루프로 표현할 수 없어(승인 전 실행을 막을 수 없다)
-# 턴 기반 상태기계 `_util.ActionService` 로 대체했다. 판단부는 이 파일 맨 아래
-# [app 전용] 블록에 있다. 사내 반입 시 origin 의 create_action_agent 는 지운다.
-# *************
+def create_action_agent(model_name: str = None):
+    """명령 실행 판단 (반송요청명령 / 목적지요청 / ...).
+
+    origin 과 같은 자리, 같은 모양의 react agent 다. 바인딩 툴만 다르다:
+    origin 은 transport_tool/dest_req_tool (즉시 실행)을 붙였지만, HITL 에서는
+    실행 전에 수집·검증·승인을 거쳐야 하므로 그 앞 단계 툴들을 붙인다.
+
+      params_extract_tool  : 발화에서 캐리어/장비 ID 판독 (DB 조회)
+      param_check_tool     : 명령별 필수 파라미터 충족 확인
+      *_validate_tool      : 파라미터가 다 모이면 유효성 검증
+
+    ★ {action}_confirm_tool / {action}_execute_tool 은 바인딩하지 않는다.
+      승인 질문은 턴을 닫을 때 ActionService 가 만들고(confirm), 실행은
+      사용자의 명시적 승인 이후 ActionService 만 호출한다(execute).
+      에이전트에 붙이면 LLM 이 승인 절차를 건너뛸 길이 생긴다.
+
+    에이전트는 판단(어떤 명령인지, 값이 뭔지)과 툴 호출을 하고, 턴을 닫는
+    흐름(질문하고 기다리기 / 승인 후 실행)은 _util.ActionService 가 잡는다.
+    """
+    return create_react_agent(
+        model=_llm.get_llm(model_name, temperature=0.0),
+        tools=disable_tool_caching([
+            _tool.params_extract_tool,
+            _tool.param_check_tool,
+            _tool.transport_validate_tool,
+            _tool.dest_req_validate_tool,
+        ]),
+        prompt=_prompt.action_agent_prompt().strip(),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -357,295 +383,18 @@ def create_final_general_agent(model_name: str = None):
 
 # *************  [app 전용 — origin 에 없음]  *************
 #
-# 아래는 전부 HITL(ActionAgent) 때문에 더해진 것이다. 사내 반입 시 이 블록만
-# 통째로 가져가면 된다.
+# 이 파일에 남은 app 추가분은 최종 응답 스트리밍 헬퍼 하나뿐이다.
 #
-# 구조화 출력은 origin 관례를 따른다 — 스키마를 **TypedDict** 로 쓰고
-# `llm.with_structured_output(스키마)` 로 호출한다 (origin 선례: _node.RouteResponse).
+# ActionAgent 판단부(어떤 명령인지 / 파라미터가 무엇인지 / 답변이 무슨 뜻인지 /
+# 승인인지)는 `_util.py` 로 옮겼다. 그 판단을 쓰는 것이 `_util.ActionService`
+# 이고, origin 관례가 "스키마는 그것을 쓰는 파일에 둔다" 이기 때문이다
+# (origin 선례: supervisor_node 가 쓰는 RouteResponse 가 _node.py 에 있다).
+# 덕분에 _util -> _agent 순환 참조를 피하려고 두었던 지연 로더도 사라졌다.
 #
-# 딱 한 가지만 origin 과 다르다: method="json_mode" 를 쓰지 않는다.
-#   json_mode 는 "유효한 JSON 인지" 만 보장하고 **스키마를 모델에 보내지 않는다.**
-#   origin 의 유일한 구조화 출력인 RouteResponse 는 필드가 next 하나뿐이라
-#   프롬프트 본문에 규칙을 적는 것으로 충분했다. 반면 아래 IntentOut 은 필드가
-#   6개이고 "옮길 대상 캐리어 vs 위치 기준 캐리어" 처럼 헷갈리는 짝이 있다.
-#   json_mode 로 두면 그 구분이 모델에 전달되지 않아 두 ID 가 서로 바뀐다
-#   (실측: carrier_id 와 reference_carrier_id 가 뒤집힘). 그래서 스키마를 실어
-#   보내는 기본 경로를 쓴다. Supervisor 쪽(_node.RouteResponse)은 origin 그대로
-#   json_mode 를 유지한다.
+# needs-핸드오프 배분(needs_dispatch)은 Supervisor 소관이라 `_node.py` 로
+# 옮겼다. 같은 이유다.
 #
-# 판단이 실패하면 값을 지어내지 않고 안전한 쪽(재질문/미승인)으로 떨어진다.
-
-from typing import Annotated, TypedDict   # noqa: E402  (app 전용 import)
-
-
-def _judge(schema, system: str, user: str, config=None, model_name: str = None):
-    """구조화 출력 한 번. 실패하면 예외를 그대로 올려 호출부가 폴백한다."""
-    runner = _llm.get_llm(model_name, temperature=0.0).with_structured_output(schema)
-    return runner.invoke(
-        [SystemMessage(content=system), HumanMessage(content=user)], config=config)
-
-
-# ── needs-핸드오프 배분 (Supervisor 소관) ─────────────────────────────────
-
-class DispatchOut(TypedDict):
-    agent: Annotated[str, "도와줄 워커 이름. 없으면 NONE"]
-    query: Annotated[str, "그 워커에게 보낼 한 문장 질의"]
-
-
-def needs_dispatch(needs: dict, members: list, config=None,
-                   model_name: str = None) -> dict:
-    """ActionAgent 의 상담 요청을 받아 도와줄 워커를 고른다.
-
-    입력은 ActionAgent 가 넘긴 원문 세 가지뿐이다.
-      question : ActionAgent 가 사용자에게 물은 것
-      answer   : 사용자가 실제로 답한 것 (원문)
-      fill     : 필요한 값의 이름
-
-    로스터(members + 프롬프트의 워커 설명)를 보고 LLM 이
-      - 이 답변을 값으로 바꿔줄 수 있는 워커 하나와
-      - 그 워커에게 보낼 질의문
-    을 고른다. 확신이 없으면 NONE — 그러면 사용자에게 직접 다시 묻는다.
-
-    워커를 새로 붙일 때 할 일은 로스터 프롬프트에 설명 한 줄을 더하는 것뿐이다.
-    ActionAgent 도, 워커 본문도 건드리지 않는다.
-
-    반환: {"agent": 워커명 or None, "query": 질의문 or None}
-    """
-    answer = str(needs.get("answer") or "")
-
-    try:
-        out = _judge(
-            DispatchOut,
-            _prompt.needs_dispatch_prompt(members).strip(),
-            (f"ActionAgent 가 사용자에게 물은 것: {needs.get('question')}\n"
-             f"사용자의 답변(원문): {answer}\n"
-             f"필요한 값: {needs.get('fill')}\n"
-             f"지금까지 확정된 파라미터: {needs.get('params')}"),
-            config=config, model_name=model_name,
-        )
-        agent = out.get("agent") if out.get("agent") in members else None
-        query = out.get("query") or (answer if agent else None)
-        print(f"[AGENT] needs_dispatch(llm) -> {agent} query='{query}'", flush=True)
-        return {"agent": agent, "query": query}
-
-    except Exception as e:
-        print(f"[AGENT] needs_dispatch llm 실패({e}) -> NONE (사용자에게 직접 질문)", flush=True)
-        return {"agent": None, "query": None}
-
-
-# ── ActionAgent 의도/파라미터 추출 ────────────────────────────────────────
-
-class IntentOut(TypedDict):
-    action: Annotated[Literal["transport", "dest_req", "unknown"], "실행할 명령"]
-    carrier_id: Annotated[str, "옮길 대상 캐리어 ID (8자 영숫자). "
-                               "'X 를 ~' 의 X. 없으면 빈 문자열"]
-    eqp_id: Annotated[str, "목적지 장비 ID (영문3자+숫자3자, 예 STK102). "
-                           "캐리어 ID 를 넣지 말 것. 없으면 빈 문자열"]
-    reference_kind: Annotated[Literal["", "carrier_location", "log_analysis"],
-                              "목적지를 리터럴이 아니라 참조로 말한 경우만 채운다. "
-                              "'다른 캐리어가 있는 위치로'=carrier_location, "
-                              "'로그 분석해 원인 장비 피해서'=log_analysis"]
-    reference_carrier_id: Annotated[str, "carrier_location 일 때 위치의 기준이 되는 "
-                                         "캐리어 ID (옮길 대상이 아닌 쪽). 없으면 빈 문자열"]
-    cancel: Annotated[bool, "취소 의사면 true"]
-
-
-def extract_intent(text: str, config=None, model_name: str = None) -> dict:
-    """자연어 -> (액션, 파라미터, 참조, 취소) 구조화 추출.
-
-    반환: {"action": str|None, "params": dict, "reference": dict|None, "cancel": bool}
-
-    LLM 이 실패하면 빈 결과를 돌려준다 — 그러면 ActionAgent 가 파라미터를
-    사용자에게 물어보는 정상 경로로 흘러간다(추측하지 않는다).
-    """
-    empty = {"action": None, "params": {}, "reference": None, "cancel": False}
-
-    try:
-        spec_desc = "\n".join(
-            f"- {name}({meta['label']}): 필수 {meta['required_params']}"
-            for name, meta in _prompt.action_catalog().items()
-        )
-
-        out = _judge(
-            IntentOut,
-            _prompt.action_agent_prompt().strip(),
-            ("사용자 발화에서 액션과 파라미터를 추출하라.\n"
-             f"{spec_desc}\n"
-             "eqp_id 가 '다른 캐리어가 있는 위치' 로 표현되면 "
-             "reference_kind=carrier_location 이고, 그 기준 캐리어를 "
-             "reference_carrier_id 에 넣는다 (carrier_id 에 넣지 않는다).\n"
-             "'로그를 분석해 원인 장비로' 처럼 표현되면 "
-             "reference_kind=log_analysis 로 표시하라.\n"
-             "eqp_id 에는 장비 ID(영문3자+숫자3자)만 넣는다. "
-             "carrier_location / log_analysis 같은 참조 표시를 eqp_id 에 쓰지 마라 "
-             "— 그건 reference_kind 필드다.\n"
-             "목적지를 아예 말하지 않았으면 reference_kind 는 빈 문자열이다. "
-             "'다른 캐리어 있는 위치로' 나 '로그 분석해서' 같은 말이 실제로 "
-             "발화에 있을 때만 채운다.\n"
-             '예: "6PDMQ283 를 9ZXCV456 있는 위치로 반송해줘"\n'
-             "   -> carrier_id=6PDMQ283, reference_carrier_id=9ZXCV456, "
-             "reference_kind=carrier_location, eqp_id=빈값\n"
-             '예: "로그 분석해서 원인 장비 피해서 6PDMQ283 반송해줘"\n'
-             "   -> carrier_id=6PDMQ283, reference_kind=log_analysis, eqp_id=빈값\n"
-             f"발화: {text}"),
-            config=config, model_name=model_name,
-        )
-
-        action = str(out.get("action") or "").strip()
-        ref_kind = str(out.get("reference_kind") or "").strip()
-
-        r = {
-            "action": None if action in ("", "unknown") else action,
-            "params": {
-                k: v for k, v in
-                {"carrier_id": str(out.get("carrier_id") or "").strip(),
-                 "eqp_id": str(out.get("eqp_id") or "").strip()}.items() if v
-            },
-            "reference": (
-                {"kind": ref_kind, "fill": "eqp_id",
-                 "carrier_id": str(out.get("reference_carrier_id") or "").strip()}
-                if ref_kind in ("carrier_location", "log_analysis") else None
-            ),
-            "cancel": bool(out.get("cancel")),
-        }
-        print(f"[AGENT] extract_intent(llm) -> {r}", flush=True)
-        return r
-
-    except Exception as e:
-        print(f"[AGENT] extract_intent llm 실패({e}) -> 빈 결과 (사용자에게 물어본다)", flush=True)
-        return empty
-
-
-# ── ActionAgent 답변 분류 / 승인 판정 ─────────────────────────────────────
-
-class CollectAnswerOut(TypedDict):
-    # 필드를 하나로 합쳐 둔다. kind + action_choice 두 칸으로 두면 작은 모델이
-    # action_choice 만 주고 kind 를 통째로 빠뜨린다(실측). 그러면 분류 불명으로
-    # 떨어져 같은 질문을 무한 반복한다. 한 칸이면 빠뜨릴 칸이 없다.
-    kind: Annotated[Literal["cancel", "consult", "switch", "value", "empty",
-                            "action_transport", "action_dest_req"],
-                    "답변의 종류"]
-
-
-def classify_collect_answer(fieldname: str, answer, current_action: str | None,
-                            question: str = None, config=None,
-                            model_name: str = None) -> dict:
-    """파라미터 질문에 대한 사용자 답변을 분류한다.
-
-    반환: {"kind": cancel|consult|switch|action|value|empty, "text"/"value"/"note"...}
-
-    value 로 분류돼도 실제 ID 인식·존재 확인은 판독기 툴(params_extract_tool)이 한다 —
-    LLM 은 종류만 판단하고 값은 만들어내지 않는다.
-    """
-    text = str(answer or "")
-
-    # /chat/stop 등이 보내는 기계 센티널 — 모델에 물을 것도 없다
-    if isinstance(answer, dict) and answer.get("aborted"):
-        return {"kind": "cancel"}
-
-    # action_transport / action_dest_req 는 '어떤 명령인지' 를 묻는 중일 때만
-    # 유효하다. 다른 파라미터를 묻는 중인데도 답변에 명령형 어미가 붙으면
-    # ("9ZXCV456 있는 위치로 채워줘") 모델이 그쪽으로 샌다(실측).
-    # 이 문장은 user 메시지 **맨 앞**에 둔다 — 뒤에 붙이면 잘 안 먹는다.
-    guard = ("" if fieldname == "action" else
-             "[중요] 지금은 명령 종류를 묻는 중이 아닙니다. "
-             "action_transport 와 action_dest_req 는 후보에서 제외하고 "
-             "나머지 중에서만 고르세요.\n")
-
-    try:
-        out = _judge(
-            CollectAnswerOut,
-            _prompt.action_collect_answer_prompt().strip(),
-            (guard
-             + f"진행 중인 명령: {current_action or '미확정'}\n"
-             f"물어본 것: {question or fieldname}\n"
-             f"묻는 파라미터: {fieldname}\n"
-             f"사용자의 답변(원문): {text}"),
-            config=config, model_name=model_name,
-        )
-        kind = str(out.get("kind") or "").strip()
-        print(f"[AGENT] classify_collect_answer(llm) -> {kind}", flush=True)
-
-        if kind == "cancel":
-            return {"kind": "cancel"}
-        if kind == "consult":
-            return {"kind": "consult", "text": text}
-        if kind == "switch":
-            return {"kind": "switch", "text": text}
-        if kind in ("action_transport", "action_dest_req"):
-            if fieldname == "action":
-                return {"kind": "action", "value": kind[len("action_"):]}
-            # action 을 묻던 게 아닌데 action 이라 답함 -> 재질문으로 강등
-            return {"kind": "empty", "note": "답변을 이해하지 못했습니다."}
-        if kind == "value":
-            return {"kind": "value", "text": text}
-        return {"kind": "empty", "note": f"답변에서 {fieldname} 값을 찾지 못했습니다."}
-
-    except Exception as e:
-        # 추측하지 않는다 — 다시 묻는 게 가장 안전하다
-        print(f"[AGENT] classify_collect_answer llm 실패({e}) -> 재질문", flush=True)
-        return {"kind": "empty", "note": "답변을 이해하지 못했습니다. 다시 알려주세요."}
-
-
-class ConfirmOut(TypedDict):
-    verdict: Annotated[Literal["approve", "reject", "unclear"], "승인 판정"]
-
-
-def classify_confirm(answer, action: str = None, params: dict = None,
-                     config=None, model_name: str = None) -> str:
-    """승인 질문에 대한 답변 판정 -> approve | reject | unclear.
-
-    approve 는 명시적 동의일 때만. 정정 시도("STK103 으로 바꿔줘")는
-    unclear 로 돌려서 호출부가 수집 루프로 되돌릴 수 있게 한다.
-    """
-    # /chat/stop 등이 보내는 기계 센티널 — 모델에 물을 것도 없다
-    if isinstance(answer, dict):
-        if answer.get("aborted"):
-            return "reject"
-        if "approved" in answer:
-            return "approve" if answer["approved"] else "reject"
-
-    try:
-        out = _judge(
-            ConfirmOut,
-            _prompt.action_confirm_prompt().strip(),
-            (f"실행하려는 명령: {action or '?'} (파라미터: {params})\n"
-             f"사용자의 답변(원문): {answer}"),
-            config=config, model_name=model_name,
-        )
-        verdict = str(out.get("verdict") or "").strip()
-        if verdict not in ("approve", "reject", "unclear"):
-            print(f"[AGENT] classify_confirm(llm) 알 수 없는 값 {verdict!r} -> unclear",
-                  flush=True)
-            return "unclear"
-        print(f"[AGENT] classify_confirm(llm) -> {verdict}", flush=True)
-        return verdict
-
-    except Exception as e:
-        # 실행은 위험하다 — 판정 못 하면 절대 승인하지 않는다
-        print(f"[AGENT] classify_confirm llm 실패({e}) -> unclear (미승인)", flush=True)
-        return "unclear"
-
-
-# ── action_node 가 가지는 판단 에이전트 ───────────────────────────────────
-
-class _ActionAgent:
-    """action_node 가 가지는 판단 에이전트.
-
-    노드는 흐름(수집 루프/턴 종료)만 잡고, 아래 판단은 전부 여기로 위임한다.
-      - extract_intent            : 최초 발화 -> 의도/파라미터/참조
-      - classify_collect_answer   : 파라미터 질문의 답 -> 종류 분류
-      - classify_confirm          : 승인 질문의 답 -> approve/reject/unclear
-    """
-    extract_intent = staticmethod(extract_intent)
-    classify_collect_answer = staticmethod(classify_collect_answer)
-    classify_confirm = staticmethod(classify_confirm)
-
-
-action_agent = _ActionAgent()
-
-
-# ── 최종 응답 스트리밍 헬퍼 (create_final_* 가 쓴다) ──────────────────────
+# 결과적으로 이 파일은 origin/_agent.py 와 거의 같다. 이식할 때 비교하기 쉽다.
 
 async def _astream_final(chain, messages: list, config):
     """체인을 스트리밍으로 돌려 AIMessage 하나로 합친다.
