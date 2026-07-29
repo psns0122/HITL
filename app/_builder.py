@@ -32,14 +32,25 @@ def build_team_graph(checkpointer=None):
     workflow.add_node("LogAgent", _node.log_node)
     workflow.add_node("ExtractAgent", _node.extract_node)
     workflow.add_node("ActionAgent", _node.action_node)
+    # *************  [app — 액션 파이프라인 내부 단계 2개. origin 에 없음]
+    # Supervisor LLM 은 이 둘의 이름을 모른다(로스터/options_for_next 밖) —
+    # 도달 경로는 아래 직접 엣지와 Supervisor 의 결정적 배관뿐이다.
+    workflow.add_node("ActionValidator", _node.action_validator_node)
+    workflow.add_node("ActionExecutor", _node.action_executor_node)
+    # *************
 
     workflow.add_node("FinalAnswerAgent", _node.final_node)
     workflow.add_node("FinalGeneralAgent", _node.final_general_node)
 
     # --- 배선
     # 워커는 실행 후 무조건 Supervisor 로 복귀한다
+    # *************  [app — ActionAgent 는 제외: 아래 conditional 로 배선한다.
+    #  정적 엣지와 conditional 이 겹치면 두 갈래가 병렬 실행된다]
     for member in _node.members:
+        if member == "ActionAgent":
+            continue
         workflow.add_edge(member, "Supervisor")
+    # *************
 
     workflow.add_edge(START, "Router")
 
@@ -63,8 +74,29 @@ def build_team_graph(checkpointer=None):
     supervisor_conditional_map["FINISH"] = "FinalAnswerAgent"
     # *************  [app — HITL 질문을 던진 턴은 FinalAnswer 없이 그대로 끝난다]
     supervisor_conditional_map["END"] = END
+    # Supervisor 의 결정적 배관이 confirming 답변을 실행 단계로 보낼 때 쓴다.
+    # conditional map 과 LLM 출력 검증 목록(options_for_next)은 별개 자료구조 —
+    # 여기 있어도 LLM 이 "ActionExecutor" 를 뱉으면 검증에서 기각된다.
+    supervisor_conditional_map["ActionExecutor"] = "ActionExecutor"
     # *************
     workflow.add_conditional_edges("Supervisor", lambda s: s["next"], supervisor_conditional_map)
+
+    # *************  [app — 액션 파이프라인 배선]
+    # 판단(1) -> 검증(2) 은 필수값이 찼을 때의 직접 엣지, 그 외엔 Supervisor 복귀.
+    workflow.add_conditional_edges("ActionAgent", lambda s: s["next"], {
+        "Supervisor": "Supervisor",
+        "ActionValidator": "ActionValidator",
+    })
+    # 검증(2)·실행(3)은 일을 마치면 Supervisor 로 복귀한다 (질문 발행 턴은
+    # Supervisor 의 턴닫기가 END 로 끝낸다). 실행 단계의 가드 반송만 예외.
+    workflow.add_conditional_edges("ActionValidator", lambda s: s["next"], {
+        "Supervisor": "Supervisor",
+    })
+    workflow.add_conditional_edges("ActionExecutor", lambda s: s["next"], {
+        "Supervisor": "Supervisor",
+        "FinalAnswerAgent": "FinalAnswerAgent",   # 진입 가드 발동 시 (핑퐁 방지)
+    })
+    # *************
 
     workflow.add_edge("FinalAnswerAgent", END)
     workflow.add_edge("FinalGeneralAgent", END)

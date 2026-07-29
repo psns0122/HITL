@@ -229,33 +229,54 @@ def create_extract_agent(model_name: str = None):
 
 
 def create_action_agent(model_name: str = None):
-    """명령 실행 판단 (반송요청명령 / 목적지요청 / ...).
+    """노드1 — 명령·파라미터 판단 + 다음 흐름 선언.
 
     origin 과 같은 자리, 같은 모양의 react agent 다. 바인딩 툴만 다르다:
     origin 은 transport_tool/dest_req_tool (즉시 실행)을 붙였지만, HITL 에서는
-    실행 전에 수집·검증·승인을 거쳐야 하므로 그 앞 단계 툴들을 붙인다.
+    실행 전에 수집·검증·승인을 거쳐야 하므로 판단 단계의 툴만 붙인다.
 
-      params_extract_tool  : 발화에서 캐리어/장비 ID 판독 (DB 조회)
-      param_check_tool     : 명령별 필수 파라미터 충족 확인
-      *_validate_tool      : 파라미터가 다 모이면 유효성 검증
+      params_extract_tool : 발화의 ID 판독 (DB 조회)
+      param_check_tool    : 명령별 필수 파라미터 충족 확인
+      flow_tool           : 다음 흐름 선언 (질문/상담/취소/이탈 + 사용자 문구)
 
-    ★ {action}_confirm_tool / {action}_execute_tool 은 바인딩하지 않는다.
-      승인 질문은 턴을 닫을 때 ActionService 가 만들고(confirm), 실행은
-      사용자의 명시적 승인 이후 ActionService 만 호출한다(execute).
-      에이전트에 붙이면 LLM 이 승인 절차를 건너뛸 길이 생긴다.
-
-    에이전트는 판단(어떤 명령인지, 값이 뭔지)과 툴 호출을 하고, 턴을 닫는
-    흐름(질문하고 기다리기 / 승인 후 실행)은 _util.ActionService 가 잡는다.
+    ★ validate/execute 는 여기 없다 — 검증은 노드2(ActionValidator)의 전용
+      에이전트가, 실행은 승인 후 노드3(ActionExecutor)만 한다.
     """
     return create_react_agent(
         model=_llm.get_llm(model_name, temperature=0.0),
         tools=disable_tool_caching([
             _tool.params_extract_tool,
             _tool.param_check_tool,
+            _tool.flow_tool,
+        ]),
+        prompt=_prompt.action_agent_prompt().strip(),
+    )
+
+
+def create_action_validator_agent(model_name: str = None):
+    """노드2 — 검증 + 결과 요약. validate 툴 2종만 바인딩."""
+    return create_react_agent(
+        model=_llm.get_llm(model_name, temperature=0.0),
+        tools=disable_tool_caching([
             _tool.transport_validate_tool,
             _tool.dest_req_validate_tool,
         ]),
-        prompt=_prompt.action_agent_prompt().strip(),
+        prompt=_prompt.action_validator_prompt().strip(),
+    )
+
+
+def create_action_confirm_agent(model_name: str = None):
+    """노드3 — 승인 판정. decide_tool 하나만 바인딩.
+
+    ★ execute 는 절대 바인딩하지 않는다. 판정(approve=True)을 읽은 뒤
+      실행은 ActionExecutor 노드 코드가 게이트 검증을 거쳐 직접 한다.
+    """
+    return create_react_agent(
+        model=_llm.get_llm(model_name, temperature=0.0),
+        tools=disable_tool_caching([
+            _tool.decide_tool,
+        ]),
+        prompt=_prompt.action_confirm_prompt().strip(),
     )
 
 

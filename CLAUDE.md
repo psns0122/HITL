@@ -49,7 +49,7 @@ app/      origin + HITL ActionAgent. 이 저장소에서 실제로 도는 코드
 
 | 항목 | origin | app | 비고 |
 |---|---|---|---|
-| ActionAgent | 일반 react agent | 턴 기반 HITL 단일 노드 (`app/_util.py 의 ActionService`) | **이번 작업의 본체** — 통째 복사. 액션 선언은 `_prompt.action_catalog()`, 툴 바인딩은 네이밍 규칙 |
+| ActionAgent | 일반 react agent | 턴 기반 HITL **3단 파이프라인** (`_node.py`: ActionAgent 판단 → ActionValidator 검증·승인질문 → ActionExecutor 판정·실행. 흐름은 flow_tool/decide_tool 로 에이전트가 선언) | **이번 작업의 본체** — 노드 3개 + 빌더 배선 + Supervisor 배관을 함께 이식. 액션 선언은 `_prompt.action_catalog()`, 툴 바인딩은 네이밍 규칙 |
 | Supervisor | LLM 배분만 | + needs-핸드오프 / Extract 선행 / HITL 턴 종료 우선순위 | 병합 필요 |
 | AgentState | messages/route/handoff/next/step/model_name | + `action`, `facts` | 필드 추가 |
 | Router 의 next | 노드 이름("Supervisor"/"GeneralAgent") | 동일 (수렴 완료) | — |

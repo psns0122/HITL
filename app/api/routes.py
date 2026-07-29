@@ -71,6 +71,8 @@ AGENT_NODES = list(members) + [
     "Router",
     "Supervisor",
     "GeneralAgent",
+    "ActionValidator",     # 액션 파이프라인 내부 단계 (트레이스 표기용)
+    "ActionExecutor",
     "FinalAnswerAgent",
     "FinalGeneralAgent",
 ]

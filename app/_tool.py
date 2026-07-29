@@ -370,10 +370,46 @@ def dest_req_confirm_tool(params: dict) -> str:
     return text
 
 
+# ── 3.5 흐름선언 tools ─────────────────────────────────────────────────────
+# side-effect 가 없다. 에이전트가 "다음에 무엇을 해야 하는지" 를 툴 호출로
+# 선언하면, 노드가 그 호출 인자를 읽어 턴을 닫는다. 판단(어떤 흐름인지)과
+# 사용자에게 보낼 문구(message)까지 전부 에이전트 몫이다.
+
+@tool
+def flow_tool(kind: str, field: str = "", message: str = "") -> str:
+    """판단 단계(ActionAgent)의 흐름 선언. 반드시 아래 kind 중 하나.
+
+    kind:
+      ask_user : 필수값 field 가 비었고 발화에 단서도 없다.
+                 message 에 사용자에게 물을 질문 문장을 직접 써라.
+      consult  : field 값이 간접 표현으로 실려 있다("~있는 위치로",
+                 "로그 분석해서 원인 장비 피해서"). 동료 에이전트의 조회가 필요.
+      cancel   : 사용자가 명령을 그만두려 한다. message 에 사유 한 줄.
+      switch   : 사용자가 진행 중 명령과 무관한 새 요청을 시작했다.
+    """
+    print(f"[TOOL flow] kind={kind} field={field} message={message[:60]!r}", flush=True)
+    return f"흐름 선언 기록됨: {kind}"
+
+
+@tool
+def decide_tool(approve: bool, reason: str = "") -> str:
+    """실행 단계(ActionExecutor)의 승인 판정 선언.
+
+    approve=True  : 사용자가 실행에 명시적으로 동의했다. 이때만 True.
+    approve=False : 거절/취소/불명/조건부 등 그 외 전부. reason 에 사유 한 줄.
+    """
+    print(f"[TOOL decide] approve={approve} reason={reason[:60]!r}", flush=True)
+    return f"판정 기록됨: approve={approve}"
+
+
 # ── 4. 실행 tools (액션별) ────────────────────────────────────────────────
 
+@tool
 def transport_execute_tool(params: dict) -> dict:
-    """진짜 반송요청 수행(목업). 승인 interrupt 통과 후에만 호출되어야 한다."""
+    """진짜 반송요청 수행(목업). 명시적 승인 후 ActionExecutor 만 호출한다.
+
+    ★ 어떤 에이전트에도 바인딩 금지 — 바인딩하면 LLM 이 승인 전에 실행할 수 있다.
+    """
     print(f"[TOOL transport_execute] enter params={params}", flush=True)
     carrier_id = (params.get("carrier_id") or "").upper()
     eqp_id = (params.get("eqp_id") or "").upper()
@@ -386,8 +422,12 @@ def transport_execute_tool(params: dict) -> dict:
     return result
 
 
+@tool
 def dest_req_execute_tool(params: dict) -> dict:
-    """진짜 목적지요청 수행(목업): 정책 1순위 목적지를 배정한다."""
+    """진짜 목적지요청 수행(목업): 정책 1순위 목적지를 배정한다.
+
+    ★ 어떤 에이전트에도 바인딩 금지 — 명시적 승인 후 ActionExecutor 만 호출한다.
+    """
     print(f"[TOOL dest_req_execute] enter params={params}", flush=True)
     carrier_id = (params.get("carrier_id") or "").upper()
     policy = mock_db.get_dest_policy(carrier_id)
