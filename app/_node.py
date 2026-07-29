@@ -6,19 +6,25 @@ Location / Status / Log / Extract 는 목업 스텁이다.
 
 ActionAgent 는 actions/node.py 의 턴 기반 단일 노드가 담당한다.
 """
+import ast
+import json
+import re
+import time
 from typing import Annotated, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
+import app.config as cfg
 from app import _agent, _llm, _prompt, _state, _util
 from app._util import (
-    action_service,
     agent_ran_this_turn,
     emit,
+    extract_json_object,
     last_user_text,
     member_answered_this_turn,
+    message_content_to_text,
 )
 # *************  [app — 워커 스텁이 목업 DB 와 ID 판독기 툴을 직접 본다.
 #                  사내 노드는 에이전트에 위임하므로 이 두 import 가 없다]  *************
@@ -325,25 +331,14 @@ async def supervisor_node(state: _state.AgentState, config) -> _state.AgentState
              {"agent": "Supervisor", "detail": "사용자 응답 대기 — 턴 종료"})
         return {"next": "END", "step": step + 1}
 
-    # 2) 진행 중인 액션이 있으면 계속 ActionAgent
-    #    (awaiting 상태에서 새 사용자 발화가 들어온 경우도 여기로 온다 —
-    #     Router 가 진행 중 액션을 보고 Supervisor 로 고정해 준다)
-    if sc.get("phase") in ("param_check", "collecting", "validating", "confirming"):
-        print("[NODE] Supervisor: 진행 중 액션 -> ActionAgent", flush=True)
-        return {"next": "ActionAgent", "step": step + 1}
-
-    # 3) 이번 턴에 워커가 이미 답을 냈으면 곧장 마무리
-    #    (예: HITL 답변 턴에서 ActionAgent 가 finalize/abandon 을 낸 직후 —
-    #     이때 Extract 선행을 태우는 건 낭비다)
-    if member_answered_this_turn(messages, ANSWERING_MEMBERS):
-        print("[NODE] Supervisor: member 응답 완료 -> FinalAnswerAgent", flush=True)
-        return {"next": "FinalAnswerAgent", "step": step + 1}
-
-    # 3-a) ExtractAgent 선행 실행
-    #    사용자 질의가 들어오면 항상 Supervisor 부터 다시 시작하고,
-    #    Supervisor 는 그 턴에 Extract 가 안 돌았으면 무조건 먼저 태운다.
-    #    -> 뒤에 오는 워커들은 추출된 ID 를 재료로 쓸 수 있다.
-    if not agent_ran_this_turn(messages, "ExtractAgent"):
+    # 2) ExtractAgent 선행 실행 — 라우팅 판단이 아니라 파이프라인 단계다.
+    #    워커가 일하기 '전' 재료 준비이므로, 이번 턴에 이미 진행 중 액션이
+    #    있거나(재료가 스크래치에 있음) 워커가 답을 낸 뒤라면 태우지 않는다.
+    #    "다음에 누가 일하느냐" 는 아래 LLM 배분이 상황을 보고 정한다.
+    in_flight = sc.get("phase") in ACTIVE_PHASES
+    answered = member_answered_this_turn(messages, ANSWERING_MEMBERS)
+    if (not in_flight and not answered
+            and not agent_ran_this_turn(messages, "ExtractAgent")):
         print("[NODE] Supervisor: ExtractAgent 선행 실행", flush=True)
         emit(config, "agent_status",
              {"agent": "Supervisor", "detail": "ExtractAgent 선행 실행"})
@@ -366,6 +361,27 @@ async def supervisor_node(state: _state.AgentState, config) -> _state.AgentState
         if content is None or str(content).strip() == "":
             continue
         clean_messages.append(msg)
+
+    # *************  [app — 상황을 하드코딩 분기 대신 LLM 에게 알려 준다]
+    # 예전에는 "진행 중 액션 -> ActionAgent", "워커 답변 완료 -> FinalAnswer" 를
+    # 코드가 강제했다. 지금은 그 사실만 대화에 실어 주고 배분은 LLM 이 한다.
+    situ = []
+    if in_flight:
+        aw = sc.get("awaiting") or {}
+        situ.append(f"진행 중인 명령이 있다: action={sc.get('action')}, "
+                    f"단계={sc.get('phase')}.")
+        if aw:
+            situ.append(f"사용자에게 '{aw.get('type')}' 질문을 던져 둔 상태이고, "
+                        "방금 사용자 발화는 그 질문에 대한 답이다. "
+                        "이 답은 그 명령을 진행하던 담당자가 이어받아야 한다.")
+    if answered:
+        who = _util.agent_name_of(answered)
+        situ.append(f"이번 턴에 {who} 가 이미 처리 결과를 냈다: "
+                    f"{str(answered.content)[:120]}")
+    if situ:
+        clean_messages = clean_messages + [
+            HumanMessage(content="[상황]\n" + "\n".join(f"- {s}" for s in situ))]
+    # *************
 
     supervisor_chain = supervisor_prompt | _llm.get_llm(
         model_name=state.get("model_name"), temperature=0
@@ -574,10 +590,590 @@ additional_kwargs={"agent_name": "ExtractAgent"})],
     }
 
 
-# *************  [app — origin 의 action_node(react agent) 를 통째 교체]  *************
+# *************  [app — origin 의 action_node 를 턴 기반 HITL 로 교체]  *************
+#
+# 원칙: 툴은 에이전트가 부른다.
+#   판독(params_extract)·파라미터 확인(param_check)·검증(validate)은 전부
+#   react agent(_agent.create_action_agent)가 스스로 호출한다. 이 노드는
+#   에이전트를 돌리고, 그 툴 호출 기록에서 판단 결과를 읽어 턴을 열고 닫는
+#   흐름만 잡는다. 노드가 직접 부르는 것은 두 가지뿐이다:
+#     · {action}_execute_tool — 명시적 승인 이후의 유일한 실행 지점
+#     · 실행 직전 validate 1회 — 안전 게이트 (승인 불변식과 같은 급)
+#
+# 판단(LLM)은 세 갈래다. 실패하면 지어내지 않고 재질문/미승인으로 떨어진다.
+#   run_action_agent        : 명령·파라미터·검증 — 에이전트+툴
+#   classify_collect_answer : 질문에 대한 답변의 종류 (값/상담/이탈/취소/무의미)
+#   classify_confirm        : 승인 판정 (approve/reject/unclear)
+
+# 진행 중으로 취급하는 phase (Supervisor 의 상황 컨텍스트·재진입 판정 기준)
+ACTIVE_PHASES = {"param_check", "collecting", "awaiting_helper", "validating", "confirming"}
+
+
+class CollectAnswerOut(BaseModel):
+    """파라미터 질문에 대한 답변의 종류. 명령 종류와 무관하게 고정이다."""
+    kind: Literal["value", "consult", "switch", "cancel", "empty"] = Field(
+        description="답변이 무엇을 하려는 것인지")
+
+
+class ConfirmOut(BaseModel):
+    """승인 질문에 대한 판정."""
+    verdict: Literal["approve", "reject", "unclear"] = Field(
+        description="실행 승인 여부")
+
+
+def classify_collect_answer(fieldname: str, answer, current_action: str | None,
+                            question: str = None, config=None,
+                            model_name: str = None) -> dict:
+    """파라미터 질문에 대한 사용자 답변을 분류한다.
+
+    반환: {"kind": value|consult|switch|cancel|empty, "text"/"note"...}
+    """
+    text = str(answer or "")
+
+    # /chat/stop 등이 보내는 기계 센티널 — 모델에 물을 것도 없다
+    if isinstance(answer, dict) and answer.get("aborted"):
+        return {"kind": "cancel"}
+
+    try:
+        out = _llm.structured_invoke(
+            _llm.get_llm(model_name, temperature=0.0),
+            CollectAnswerOut,
+            [SystemMessage(content=_prompt.action_collect_answer_prompt().strip()),
+             HumanMessage(content=f"""진행 중인 명령: {current_action or '아직 정해지지 않음'}
+사용자에게 물어본 것: {question or fieldname}
+지금 받아야 하는 값: {fieldname}
+사용자의 답변(원문): {text}""")],
+            config=config)
+        print(f"[AGENT] classify_collect_answer(llm) -> {out.kind}", flush=True)
+        if out.kind in ("value", "consult", "switch"):
+            return {"kind": out.kind, "text": text}
+        if out.kind == "cancel":
+            return {"kind": "cancel"}
+        return {"kind": "empty", "note": f"답변에서 {fieldname} 값을 찾지 못했습니다."}
+
+    except Exception as e:
+        # 추측하지 않는다 — 다시 묻는 게 가장 안전하다
+        print(f"[AGENT] classify_collect_answer llm 실패({e}) -> 재질문", flush=True)
+        return {"kind": "empty", "note": "답변을 이해하지 못했습니다. 다시 알려주세요."}
+
+
+def classify_confirm(answer, action: str = None, params: dict = None,
+                     config=None, model_name: str = None) -> str:
+    """승인 질문에 대한 답변 판정 -> approve | reject | unclear."""
+    # /chat/stop 등이 보내는 기계 센티널 — 모델에 물을 것도 없다
+    if isinstance(answer, dict):
+        if answer.get("aborted"):
+            return "reject"
+        if "approved" in answer:
+            return "approve" if answer["approved"] else "reject"
+
+    try:
+        out = _llm.structured_invoke(
+            _llm.get_llm(model_name, temperature=0.0),
+            ConfirmOut,
+            [SystemMessage(content=_prompt.action_confirm_prompt().strip()),
+             HumanMessage(content=f"""실행하려는 명령: {action or '?'} (파라미터: {params})
+사용자의 답변(원문): {answer}""")],
+            config=config)
+        print(f"[AGENT] classify_confirm(llm) -> {out.verdict}", flush=True)
+        return out.verdict
+
+    except Exception as e:
+        # 실행은 위험하다 — 판정 못 하면 절대 승인하지 않는다
+        print(f"[AGENT] classify_confirm llm 실패({e}) -> unclear (미승인)", flush=True)
+        return "unclear"
+
+
+def _parse_tool_result(content) -> dict:
+    """ToolMessage.content 를 dict 로. JSON 도 파이썬 repr 도 받는다."""
+    text = message_content_to_text(content)
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            data = parser(text)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {}
+
+
+async def run_action_agent(task: str, config=None, model_name: str = None,
+                           extracted: dict = None) -> dict:
+    """react agent 를 한 번 돌리고 판단 결과를 읽는다.
+
+    task 는 에이전트에게 줄 일감 문장 — 신규 발화 원문이거나, 재진입이면
+    "진행 중인 명령 X 에서 사용자가 이렇게 답했다 / 동료가 이렇게 답했다"
+    까지 담은 문단이다. 에이전트는 어느 경우든 똑같이 판독기 -> param_check
+    -> validate 순서로 툴을 부르며 일한다.
+
+    반환: {"action", "params", "missing", "valid", "summary"}
+      action  : 에이전트가 판단한 명령 (없으면 None)
+      params  : param_check 에 실은 파라미터 (normalized 결과 우선)
+      missing : param_check 결과의 부족 목록 (param_check 미호출이면 None)
+      valid   : validate 결과 dict (미호출이면 None)
+      summary : 마지막 답변 텍스트 (<think> 제거) — 승인 질문 머리말로 재활용
+
+    판단 결과는 자유 텍스트가 아니라 **툴 호출 인자/결과**에서 읽는다.
+    모델이 툴을 정식으로 못 부르고 텍스트 JSON 을 뱉으면 그것도 읽고,
+    그래도 명령이 비면 구조화 출력으로 명령만 한 번 더 묻는다(강제
+    tool_choice 는 자유 호출보다 안정적이다 — 실측). 전부 LLM 판단이다.
+    """
+    from app._agent import create_action_agent   # _agent 가 _node 를 안 봐서 안전하지만 관례 유지
+
+    def _made_tool_calls(result) -> bool:
+        return any((getattr(m, "tool_calls", None) or [])
+                   for m in result.get("messages", []))
+
+    empty = {"action": None, "params": {}, "missing": None, "valid": None, "summary": ""}
+
+    try:
+        agent = create_action_agent(model_name=model_name)
+        out = await agent.ainvoke({"messages": [HumanMessage(content=task)]},
+                                  config=config)
+
+        # 툴을 아예 안 불렀거나, 부른 게 전부 인자 오류로 실패했으면
+        # (실측: params_extract_tool 을 text 인자 없이 호출) 지시를 얹어 1회 재시도
+        def _all_tool_errors(result) -> bool:
+            tms = [m for m in result.get("messages", []) if isinstance(m, ToolMessage)]
+            return bool(tms) and all(
+                message_content_to_text(m.content).startswith("Error invoking tool")
+                for m in tms)
+
+        if not _made_tool_calls(out) or _all_tool_errors(out):
+            print("[AGENT] run_action_agent: 툴 호출 없음/실패 -> 1회 재시도", flush=True)
+            nudge = ("반드시 도구를 호출해서 처리하라. 너에게 있는 도구는 "
+                     "params_extract_tool / param_check_tool / "
+                     "transport_validate_tool / dest_req_validate_tool 뿐이다. "
+                     "params_extract_tool 을 부를 때는 text 인자에 사용자 발화 "
+                     "원문을 그대로 넣어라. 로그 분석이나 위치 조회는 네 일이 "
+                     "아니다 — 그런 값은 비워 두고 param_check 까지만 하라.")
+            out = await agent.ainvoke(
+                {"messages": [HumanMessage(content=task),
+                              HumanMessage(content=nudge)]},
+                config=config)
+
+        catalog = _prompt.action_catalog()
+        action, params, missing, valid = None, {}, None, None
+        extract = None   # 마지막 params_extract_tool 결과 (DB 판독 사실)
+
+        for m in out.get("messages", []):
+            # 에이전트의 판단 = 툴 호출 인자
+            for tc in (getattr(m, "tool_calls", None) or []):
+                name = tc.get("name") or ""
+                args = tc.get("args") or {}
+                if name == "param_check_tool":
+                    action = (args.get("action") or "").strip() or action
+                    got = {k: str(v).strip().upper()
+                           for k, v in (args.get("params") or {}).items()
+                           if v and str(v).strip()}
+                    if got:
+                        params = got
+                elif name.endswith("_validate_tool") and name[:-len("_validate_tool")] in catalog:
+                    # param_check 를 건너뛰고 validate 부터 부르는 모델이 있다(실측).
+                    # 그 툴을 골랐다는 것 자체가 명령 판단이므로 같은 근거로 읽는다.
+                    action = name[:-len("_validate_tool")]
+                    got = {k: str(v).strip().upper()
+                           for k, v in (args.get("params") or {}).items()
+                           if v and str(v).strip()}
+                    if got:
+                        params = got
+            # 툴의 답 = 확인된 사실 (판독 결과 / missing / 검증 결과 / 정규화 값)
+            if isinstance(m, ToolMessage):
+                data = _parse_tool_result(m.content)
+                tname = getattr(m, "name", "") or ""
+                if tname == "params_extract_tool" and "carrier_ids" in data:
+                    extract = data
+                if tname == "param_check_tool" and "missing" in data:
+                    missing = list(data.get("missing") or [])
+                    norm = {k: str(v).strip().upper()
+                            for k, v in (data.get("normalized") or {}).items()
+                            if v and str(v).strip()}
+                    if norm:
+                        params = norm
+                elif tname.endswith("_validate_tool") and "ok" in data:
+                    valid = data
+
+        # 모델이 툴 호출을 텍스트 JSON 으로 뱉은 경우도 같은 판단으로 읽는다
+        if not action:
+            for m in out.get("messages", []):
+                pseudo = extract_json_object(
+                    message_content_to_text(getattr(m, "content", "")))
+                if pseudo.get("name") == "param_check_tool":
+                    args = pseudo.get("arguments") or pseudo.get("args") or {}
+                    action = (args.get("action") or "").strip() or action
+                    got = {k: str(v).strip().upper()
+                           for k, v in (args.get("params") or {}).items()
+                           if v and str(v).strip()}
+                    if got:
+                        params = got
+
+        # 카탈로그에 없는 명령을 지어냈으면 불명 처리
+        if action and action not in catalog:
+            print(f"[AGENT] run_action_agent: 모르는 명령 {action!r} -> 불명", flush=True)
+            action = None
+
+        # 그래도 명령이 비면 구조화 출력으로 명령 하나만 다시 묻는다
+        if not action:
+            names = tuple(catalog.keys()) + ("unknown",)
+            PickOut = create_model(
+                "PickOut",
+                action=(Literal[names],
+                        Field(description="사용자가 요구한 명령. 모르면 unknown")))
+            pick = _llm.structured_invoke(
+                _llm.get_llm(model_name, temperature=0.0), PickOut,
+                [SystemMessage(content=_prompt.action_agent_prompt().strip()),
+                 HumanMessage(content=f"""아래 발화가 요구하는 명령 이름 하나만 답하라. 모르면 unknown.
+발화: {task}""")],
+                config=config)
+            if pick.action != "unknown":
+                action = pick.action
+                print(f"[AGENT] run_action_agent: 구조화 폴백 -> {action}", flush=True)
+
+        # 에이전트가 판독까지만 하고 param_check 를 건너뛰거나 판독 호출 자체를
+        # 망치면 판독 결과가 버려진다(실측). 판독기는 DB 조회 — 이번 실행의
+        # 판독 결과가 없으면 ExtractAgent 가 이번 턴에 선행 판독해 둔 결과
+        # (extracted)로 대신한다. 어느 쪽이든 **후보가 유일할 때만** 해당 자리에
+        # 기계 대입한다. 후보가 여럿이면(어느 쪽이 대상인지는 판단의 영역)
+        # 비워 두고 상담/질문 경로로 흘린다.
+        src = extract or extracted
+        if action and src:
+            slot = {"carrier_id": src.get("carrier_ids") or [],
+                    "eqp_id": src.get("eqp_ids") or []}
+            for field in catalog[action]["required_params"]:
+                pool = slot.get(field, [])
+                if not params.get(field) and len(pool) == 1:
+                    params[field] = str(pool[0]).upper()
+                    # 에이전트의 검증은 이 값이 없던 시점의 결과다 — 무효화.
+                    # (안 하면 낡은 실패 결과가 방금 채운 값을 도로 지운다. 실측)
+                    valid = None
+
+        summary = ""
+        msgs = out.get("messages", [])
+        if msgs:
+            summary = message_content_to_text(getattr(msgs[-1], "content", ""))
+            summary = re.sub(r"<think>.*?</think>", "", summary, flags=re.DOTALL).strip()
+
+        r = {"action": action, "params": params, "missing": missing,
+             "valid": valid, "summary": summary}
+        print(f"[AGENT] run_action_agent -> action={action} params={params} "
+              f"missing={missing} valid={'ok' if (valid or {}).get('ok') else valid and valid.get('code')}",
+              flush=True)
+        return r
+
+    except Exception as e:
+        # 추측하지 않는다 — 되묻는 게 안전하다
+        print(f"[AGENT] run_action_agent 실패({e}) -> 불명 (사용자에게 묻는다)", flush=True)
+        return empty
+
+
 async def action_node(state: _state.AgentState, config) -> _state.AgentState:
-    """명령 실행 — 턴 기반 HITL 상태기계 (_util.ActionService 에 위임)."""
-    return await action_service.action_node(state, config)
+    """명령 실행 — 턴 기반 HITL.
+
+    interrupt() 를 쓰지 않는다. 사용자에게 물을 게 생기면 질문을
+    action.awaiting 에 싣고 턴을 정상 종료하며, 답변은 새 턴으로 들어와
+    Router -> Supervisor 를 거쳐 여기 재진입한다. 상태의 근거는 오직
+    action 스크래치이고, execute 는 명시적 승인 이후에만 도달한다.
+
+    진입 유형: ① 헬퍼 답변 회수 ② HITL 답변 ③ 재진입(질문 재조립) ④ 신규.
+    어느 유형이든 값을 바꾸는 판단은 에이전트(run_action_agent)가 툴을
+    불러서 하고, 이 함수는 그 결과로 턴의 끝(질문/상담/승인/실행/포기)만 정한다.
+    """
+    print("[NODE] ActionAgent entered", flush=True)
+    sc = dict(state.get("action") or {})
+    msgs = state.get("messages") or []
+    awaiting = sc.get("awaiting")
+    model_name = state.get("model_name")
+    step = {"step": state.get("step", 0) + 1}
+
+    # ── 턴을 닫는 조각들 (스크래치를 공유하는 지역 함수) ────────────────────
+
+    def say(text: str) -> list:
+        return [AIMessage(content=text, name="ActionAgent",
+                          additional_kwargs={"agent_name": "ActionAgent"})]
+
+    def ask_param(field: str) -> dict:
+        """⏸ 부족한 값을 묻고 턴 종료."""
+        if field == "action":
+            prompt = _prompt.action_select_prompt()
+        else:
+            prompt = _prompt.action_catalog()[sc["action"]]["param_prompts"][field]
+        note = sc.pop("last_parse_error", None)
+        if note:
+            prompt = f"{note}\n{prompt}"
+        sc["pending_field"] = field
+        sc["phase"] = "collecting"
+        sc["awaiting"] = {"type": "collect_param", "agent": "ActionAgent",
+                          "action": sc.get("action"), "field": field,
+                          "prompt": prompt, "params": sc.get("params", {}),
+                          "missing": sc.get("missing", [])}
+        print(f"[ACTION ask_param] ⏸ 질문 남기고 턴 종료 field={field}", flush=True)
+        return {"action": sc, "messages": say(prompt), "next": "Supervisor", **step}
+
+    def ask_confirm() -> dict:
+        """⏸ 실행 직전 승인 질문. 머리말은 에이전트 요약, 명세는 코드가 박는다."""
+        summary = (sc.pop("agent_summary", "") or "").strip()
+        if summary:
+            param_lines = "\n".join(f"- {k}: {v}" for k, v in sc["params"].items())
+            guidance = f"{summary}\n{param_lines}\n이 명령을 정말 실행할까요? (승인/거절)"
+        else:
+            guidance = getattr(_tool, f"{sc['action']}_confirm_tool")(sc["params"])
+        sc["phase"] = "confirming"
+        sc["awaiting"] = {"type": "confirm", "agent": "ActionAgent",
+                          "action": sc["action"], "prompt": guidance,
+                          "params": sc["params"], "options": ["승인", "거절"],
+                          "asked_at": time.time()}   # 승인 TTL 기준 시각
+        print(f"[ACTION ask_confirm] ⏸ 승인 질문 남기고 턴 종료", flush=True)
+        return {"action": sc, "messages": say(guidance), "next": "Supervisor", **step}
+
+    def abandon(reason: str) -> dict:
+        """취소/거절/한도초과 종료. 스크래치 리셋 — 재시도 집착 금지."""
+        catalog = _prompt.action_catalog()
+        label = catalog[sc["action"]]["label"] if sc.get("action") in catalog else "명령"
+        print(f"[ACTION abandon] {reason}", flush=True)
+        return {"messages": say(f"🚫 {label} 을(를) 실행하지 않았습니다.\n- 사유: {reason}"),
+                "facts": {"last_action": {"action": sc.get("action"),
+                                          "aborted": True, "reason": reason}},
+                "action": {}, "next": "Supervisor", **step}
+
+    def restart(text: str) -> dict:
+        """맥락 이탈 — 진행 중 액션을 접고 새 발화로 다시 시작."""
+        print(f"[ACTION restart] 새 질문으로 재시작: '{text}'", flush=True)
+        return {"messages": [HumanMessage(content=text)],
+                "action": {}, "next": "Supervisor", **step}
+
+    def needs_exit(fill: str) -> dict:
+        """Supervisor 에게 상담하러 정상 종료. 발화 원문만 넘긴다."""
+        if sc.get("action") and fill != "action":
+            question = _prompt.action_catalog()[sc["action"]]["param_prompts"].get(fill, "")
+        else:
+            question = _prompt.action_select_prompt()
+        sc["needs"] = {"fill": fill, "question": question,
+                       "answer": sc.pop("consult_text"),
+                       "params": dict(sc.get("params") or {})}
+        sc["phase"] = "awaiting_helper"
+        print(f"[ACTION needs_exit] Supervisor 상담 -> fill={fill}", flush=True)
+        return {"action": sc, "next": "Supervisor", **step}
+
+    async def execute() -> dict:
+        """실행 — 명시적 승인 이후에만 도달하는 유일한 side-effect 지점.
+
+        실행 직전 validate 를 한 번 더 태운다. 승인 대기 동안 설비 상태가
+        변했을 수 있어서다. 이것은 에이전트 우회가 아니라 안전 게이트다.
+        """
+        v = await getattr(_tool, f"{sc['action']}_validate_tool").ainvoke(
+            {"params": sc["params"]}, config=config)
+        if not v.get("ok"):
+            print(f"[ACTION execute] 게이트 검증 실패({v.get('code')}) -> 재수집", flush=True)
+            for bad in v.get("bad_fields", []):
+                sc["params"].pop(bad, None)
+            sc["last_parse_error"] = f"검증 실패: {v.get('reason')}"
+            missing = [p for p in _prompt.action_catalog()[sc["action"]]["required_params"]
+                       if not sc["params"].get(p)]
+            return ask_param(missing[0] if missing else "action")
+
+        result = getattr(_tool, f"{sc['action']}_execute_tool")(sc["params"])
+        emit(config, "tool_call", {"agent": "ActionAgent",
+                                   "tool": f"{sc['action']}_execute_tool",
+                                   "args": sc["params"], "result": result})
+        label = _prompt.action_catalog()[sc["action"]]["label"]
+        payload = result.get("payload", {})
+        lines = [f"✅ {label} 실행 완료",
+                 f"- Job ID: {result.get('job_id')}",
+                 f"- 상태: {result.get('status')}"]
+        lines += [f"- {k}: {v2}" for k, v2 in payload.items()]
+        print(f"[ACTION execute] job={result.get('job_id')}", flush=True)
+        return {"messages": say("\n".join(lines)),
+                "facts": {"last_action": {"action": sc["action"],
+                                          "params": sc.get("params"),
+                                          "result": result}},
+                "action": {}, "next": "Supervisor", **step}
+
+    # ── 진입 판정 + 에이전트 실행 ────────────────────────────────────────────
+
+    harvest = None   # run_action_agent 결과. 값을 바꾸는 진입이면 반드시 채워진다
+
+    # ① 헬퍼 답변 회수 (needs-핸드오프 복귀)
+    if sc.get("needs") and sc.get("needs_result"):
+        res = sc.pop("needs_result") or {}
+        needs = sc.pop("needs")
+        sc.pop("consult_text", None)
+        sc["hops"] = sc.get("hops", 0) + 1
+        print(f"[ACTION entry] 헬퍼({res.get('by')}) 결과 회수", flush=True)
+        if res.get("text"):
+            harvest = await run_action_agent(
+                f"""진행 중인 명령: {sc.get('action')} (지금까지 확보한 값: {sc.get('params')})
+'{needs['fill']}' 값을 알아내려고 동료 {res.get('by')} 에게 물었고, 아래가 그 답변이다.
+답변에서 {needs['fill']} 값을 판독해 param_check 까지 수행하라.
+분석형 답변은 결론(권장값)이 마지막에 오는 경향이 있다.
+동료의 답변:
+{res['text']}""",
+                config=config, model_name=model_name)
+            merged = dict(harvest["params"])
+            merged.update({k: v for k, v in (sc.get("params") or {}).items() if v})
+            if harvest["params"].get(needs["fill"]):
+                merged[needs["fill"]] = harvest["params"][needs["fill"]]
+            sc["params"] = merged
+        else:
+            sc["collect_retries"] = sc.get("collect_retries", 0) + 1
+            sc["last_parse_error"] = res.get("note") or "동료 답변에서 값을 찾지 못했습니다."
+
+    # ② HITL 답변 (질문을 던져 두었고, 새 사용자 발화가 들어왔다)
+    elif awaiting and msgs and isinstance(msgs[-1], HumanMessage):
+        answer = last_user_text(msgs)
+        print(f"[ACTION entry] HITL 답변 수신({awaiting['type']}): {answer!r}", flush=True)
+        sc.pop("awaiting", None)
+
+        if awaiting["type"] == "confirm":
+            # 승인 TTL — 내용과 무관하게 시간 초과면 만료 (판단이 아니라 시계다)
+            asked_at = awaiting.get("asked_at")
+            if asked_at is not None and time.time() - asked_at > cfg.CONFIRM_TTL_SEC:
+                print(f"[ACTION confirm_ttl] 만료 -> abandon", flush=True)
+                return abandon(f"승인 유효시간({cfg.CONFIRM_TTL_SEC}초)이 지나 "
+                               "실행하지 않았습니다. 필요하면 명령을 다시 요청해 주세요.")
+
+            verdict = classify_confirm(answer, action=sc.get("action"),
+                                       params=sc.get("params"),
+                                       config=config, model_name=model_name)
+            if verdict == "approve":
+                return await execute()
+            if verdict == "reject":
+                return abandon("사용자가 실행을 거절해 명령을 종료합니다.")
+
+            # 판정 불가 — 취소/이탈부터 가리고, 아니면 정정 시도로 본다
+            kind = classify_collect_answer(
+                "승인 여부", answer, sc.get("action"),
+                question="이 명령을 정말 실행할까요? (승인/거절)",
+                config=config, model_name=model_name)["kind"]
+            if kind == "cancel":
+                return abandon("사용자가 실행을 취소해 명령을 종료합니다.")
+            if kind == "switch":
+                return restart(answer)
+            harvest = await run_action_agent(
+                f"""진행 중인 명령: {sc.get('action')} (확보한 값: {sc.get('params')})
+실행 승인을 물었더니 사용자가 승인 대신 이렇게 답했다 — 값을 고치려는 것으로 보인다:
+{answer}
+정정된 값을 판독해 param_check 와 validate 까지 수행하라.""",
+                config=config, model_name=model_name)
+            merged = dict(sc.get("params") or {})
+            merged.update(harvest["params"])          # 정정이므로 새 값이 이긴다
+            sc["params"] = merged
+
+        else:   # collect_param
+            field = awaiting.get("field")
+            kind_r = classify_collect_answer(field, answer, sc.get("action"),
+                                             question=awaiting.get("prompt"),
+                                             config=config, model_name=model_name)
+            kind = kind_r["kind"]
+            if kind == "cancel":
+                return abandon("사용자 요청으로 명령을 취소했습니다.")
+            if kind == "switch":
+                return restart(answer)
+            if kind == "consult":
+                sc["consult_text"] = answer
+            elif kind == "empty":
+                sc["collect_retries"] = sc.get("collect_retries", 0) + 1
+                sc["last_parse_error"] = kind_r.get("note", "")
+            elif field == "action":
+                harvest = await run_action_agent(answer, config=config,
+                                                 model_name=model_name)
+                if harvest["action"]:
+                    sc["action"] = harvest["action"]
+                    merged = dict(harvest["params"])
+                    merged.update({k: v for k, v in (sc.get("params") or {}).items() if v})
+                    sc["params"] = merged
+                else:
+                    sc["collect_retries"] = sc.get("collect_retries", 0) + 1
+                    sc["last_parse_error"] = "답변에서 명령을 알아내지 못했습니다."
+            else:
+                harvest = await run_action_agent(
+                    f"""진행 중인 명령: {sc.get('action')} (확보한 값: {sc.get('params')})
+'{field}' 값을 물었고 사용자가 이렇게 답했다:
+{answer}
+이 답에서 {field} 값을 판독해 param_check 와 validate 까지 수행하라.
+판독되지 않는 ID 면 지어내지 말고 빈 값으로 보고하라.""",
+                    config=config, model_name=model_name)
+                merged = dict(sc.get("params") or {})
+                merged.update(harvest["params"])      # 새로 받은 값이 이긴다
+                sc["params"] = merged
+
+    # ③ 진행 중 재진입 (새 발화 없음) — 하던 질문을 다시 조립한다
+    elif sc.get("phase") in ACTIVE_PHASES:
+        print(f"[ACTION entry] 재진입 (phase={sc.get('phase')})", flush=True)
+        sc.pop("awaiting", None)
+
+    # ④ 신규 진입
+    else:
+        text = last_user_text(msgs)
+        print(f"[ACTION entry] 신규 진입: '{text}'", flush=True)
+        # ExtractAgent 가 이번 턴에 선행 판독해 둔 결과를 재료로 넘긴다 —
+        # 상류 에이전트의 툴 작업 재사용이지, 노드가 툴을 대신 부르는 게 아니다
+        fx = (state.get("facts") or {}).get("extracted") or {}
+        task = text
+        if fx.get("carrier_ids") or fx.get("eqp_ids"):
+            task = (f"{text}\n[이번 턴 판독 결과] carrier_ids={fx.get('carrier_ids')}, "
+                    f"eqp_ids={fx.get('eqp_ids')} — 이 값은 이미 DB 로 확인된 것이다.")
+        harvest = await run_action_agent(task, config=config, model_name=model_name,
+                                         extracted=fx)
+        sc = {"action": harvest["action"],
+              "phase": "param_check",
+              "params": dict(harvest["params"]),
+              "missing": [],
+              # 필수값이 비면 원문을 들고 무조건 Supervisor 상담부터 —
+              # 간접 표현("~있는 위치로")의 해석은 Supervisor 소관이다.
+              "consult_text": text,
+              "collect_retries": 0, "validate_retries": 0, "hops": 0}
+
+    if harvest and harvest.get("summary"):
+        sc["agent_summary"] = harvest["summary"]
+
+    # ── 턴의 끝 정하기 (단일 패스) ──────────────────────────────────────────
+    #
+    # 판단은 이미 끝났다. 여기서는 스크래치 사실만 보고 다음 한 수를 정한다.
+
+    # 명령 불명 -> 상담 대상이 아니다(명령 종류는 사용자의 의도) -> 직접 질문
+    if not sc.get("action"):
+        sc.pop("consult_text", None)
+        if sc.get("collect_retries", 0) >= cfg.MAX_COLLECT:
+            return abandon("필수 파라미터를 수집하지 못해 요청을 종료합니다.")
+        return ask_param("action")
+
+    required = _prompt.action_catalog()[sc["action"]]["required_params"]
+    sc["missing"] = [p for p in required if not (sc.get("params") or {}).get(p)]
+
+    if sc["missing"]:
+        fill = sc["missing"][0]
+        if sc.get("consult_text") and sc.get("hops", 0) < cfg.MAX_HOPS:
+            return needs_exit(fill)
+        sc.pop("consult_text", None)
+        if sc.get("collect_retries", 0) >= cfg.MAX_COLLECT:
+            return abandon("필수 파라미터를 수집하지 못해 요청을 종료합니다.")
+        return ask_param(fill)
+
+    # 필수값 충족 — 검증 결과 확인.
+    # 에이전트의 검증 결과는 '그때 그 값' 기준이다. 병합으로 값이 달라졌으면
+    # 낡은 결과이므로 버리고 게이트를 태운다.
+    v = (harvest or {}).get("valid")
+    if v is not None and dict((harvest or {}).get("params") or {}) != dict(sc.get("params") or {}):
+        v = None
+    if v is None:
+        # 이번 진입의 에이전트가 검증까지 못 갔다(수집 직후 재조립 등).
+        # 실행 직전 게이트와 같은 성격으로 여기서 한 번 태운다 [안전 게이트].
+        v = await getattr(_tool, f"{sc['action']}_validate_tool").ainvoke(
+            {"params": sc["params"]}, config=config)
+
+    if v.get("ok"):
+        return ask_confirm()
+
+    sc["validate_retries"] = sc.get("validate_retries", 0) + 1
+    if sc["validate_retries"] >= cfg.MAX_VALIDATE:
+        return abandon(f"유효성 검증에 반복 실패해 요청을 종료합니다. (사유: {v.get('reason')})")
+    for bad in v.get("bad_fields", []):
+        sc["params"].pop(bad, None)
+    # 검증에서 튕긴 값은 직접 읽어 넣었던 값 — 원문 상담으로 캘 게 없다
+    sc.pop("consult_text", None)
+    sc["last_parse_error"] = f"검증 실패: {v.get('reason')}"
+    remaining = [p for p in required if not sc["params"].get(p)]
+    return ask_param(remaining[0] if remaining else "action")
 # *************
 
 
