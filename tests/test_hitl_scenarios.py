@@ -30,7 +30,9 @@ async def main():
 
     async def turn(cfg, text):
         """모든 입력은 새 턴 — HITL 답변도 예외 없다."""
-        return await graph.ainvoke({"messages": [HumanMessage(text)]}, cfg)
+        # origin router_node 는 state["model_name"] 을 직접 읽는다 — 항상 실어 준다
+        return await graph.ainvoke(
+            {"messages": [HumanMessage(text)], "model_name": None}, cfg)
 
     async def awaiting(cfg):
         """HITL 대기 payload. 없으면 None."""
@@ -161,7 +163,7 @@ async def main():
     await turn(cfg, "6PDMQ283 반송해줘")
     seen = []
     async for ev in graph.astream_events(
-            {"messages": [HumanMessage("STK102")]}, cfg, version="v2"):
+            {"messages": [HumanMessage("STK102")], "model_name": None}, cfg, version="v2"):
         md = ev.get("metadata") or {}
         node = md.get("langgraph_node")
         if node and (not seen or seen[-1] != node):

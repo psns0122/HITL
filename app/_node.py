@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from pydantic import BaseModel, Field
 
-from app import _agent, _llm, _prompt, _state
+from app import _agent, _llm, _prompt, _state, _util
 from app._util import (
     action_service,
     agent_ran_this_turn,
@@ -146,30 +146,31 @@ def _model_of(state: _state.AgentState) -> str | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Router
+# Router / GeneralAgent — origin/_node.py 원문. app 추가분은 ************* 표시
 # ─────────────────────────────────────────────────────────────────────────
 
-async def router_node(state: _state.AgentState, config) -> dict:
-    """일반 질의면 GeneralAgent, 업무 질의면 Supervisor 로 보낸다."""
+async def router_node(state: _state.AgentState) -> _state.AgentState:
+    """일반 질의면 GeneralAgent, 업무 질의면 Supervisor 로 보낸다.
+
+    _agent.router_agent 가 route 를 판단하고, 노드가 그 값을 노드 이름으로
+    바꿔 next 에 싣는다.
+    """
     messages = state.get("messages", []) or []
-
     if messages and isinstance(messages[-1], HumanMessage):
-        print(f"[USER] {messages[-1].content}", flush=True)
+        print(f"[USER] {messages[-1].content}")
 
-    print("[NODE] Router entered", flush=True)
-    emit(config, "agent_status", {"agent": "Router", "detail": "의도 분류 중"})
+    print("[NODE] Router entered")
 
-    # [app 추가] HITL 진행 중이면 분류할 것도 없이 Supervisor 로 고정한다.
-    # (HITL 답변이 general 로 오분류되면 진행 중 액션이 고아가 되기 때문)
+    # *************  [app — 진행 중 HITL 액션이 있으면 분류 없이 Supervisor 고정.
+    #  HITL 답변("STK102")이 general 로 오분류되면 진행 중 액션이 고아가 된다]
     if (state.get("action") or {}).get("phase"):
         print("[NODE] Router: 진행 중 액션 감지 -> Supervisor 고정", flush=True)
         return {"route": "supervisor", "handoff": True, "next": "Supervisor", "step": 1}
+    # *************
 
-    # 사내 원본과 동일: 에이전트가 route 를 판단하고,
-    # 노드가 그 값을 노드 이름으로 바꿔 next 에 싣는다.
     result = await _agent.router_agent({
-        "messages": state.get("messages", []),
-        "model_name": state.get("model_name"),
+        "messages": state["messages"],
+        "model_name": state["model_name"],
     })
 
     route = result.get("route", "supervisor")
@@ -181,28 +182,53 @@ async def router_node(state: _state.AgentState, config) -> dict:
     return {"route": route, "handoff": False, "next": next_node, "step": 1}
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# GeneralAgent
-# ─────────────────────────────────────────────────────────────────────────
+async def general_node(state: _state.AgentState) -> _state.AgentState:
+    """일반 대화. 업무 질의로 재판정되면 Supervisor 로 handoff 한다."""
+    print("[NODE] General entered")
 
-async def general_node(state: _state.AgentState, config) -> dict:
-    """일반 대화. 업무 질의로 재판정되면 Supervisor 로 넘긴다."""
-    print("[NODE] GeneralAgent entered", flush=True)
-    emit(config, "agent_status", {"agent": "GeneralAgent", "detail": "일반 질의 처리"})
+    input_messages = state.get("messages", []) or []
+    q = _util.last_user_text(state)
 
-    result = await _agent.general_agent(state)
+    # 세이프티 핸드오프 재판정
+    route2 = await _agent.classify_route_with_llm(q)
 
-    # handoff=True 면 Supervisor 로, 아니면 FinalGeneralAgent 로 마무리
-    next_node = "Supervisor" if result.get("handoff") else "FINISH"
+    if route2 == "supervisor":
+        return {
+            "messages": [],
+            "handoff": True,
+            "route": "supervisor",
+            "next": "Supervisor",
+            "step": state.get("step", 0) + 1,
+        }
 
-    return {**result, "next": next_node, "step": state.get("step", 0) + 1}
+    # 일반 대화 확정 -> react agent(툴 포함)로 답변 생성
+    general_agent = _agent.create_general_agent(model_name=state.get("model_name"))
+
+    result = general_agent.invoke({"messages": state["messages"]})
+
+    result_messages = result.get("messages", []) or []
+
+    # 이번 호출로 새로 늘어난 메시지만 잘라낸다
+    prev_len = len(input_messages)
+    new_messages = result_messages[prev_len:]
+
+    if not new_messages and result_messages:
+        new_messages = result_messages
+
+    return {
+        "messages": new_messages,
+        "handoff": False,
+        "route": "general",
+        "next": "FINISH",
+        "step": state.get("step", 0) + 1,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────
 # Supervisor
 # ─────────────────────────────────────────────────────────────────────────
 
-async def supervisor_node(state: _state.AgentState, config) -> dict:
+async def supervisor_node(state: _state.AgentState, config) -> _state.AgentState:
     """워커 배분. 결정적 규칙을 먼저 보고, 남으면 LLM 에게 묻는다.
 
     우선순위
@@ -402,7 +428,7 @@ async def supervisor_node(state: _state.AgentState, config) -> dict:
 # 워커 노드들 (목업 스텁)
 # ─────────────────────────────────────────────────────────────────────────
 
-def location_node(state: _state.AgentState, config, model_name: str = None) -> dict:
+def location_node(state: _state.AgentState, config) -> _state.AgentState:
     """캐리어 위치 조회.
 
     needs-핸드오프 관련 코드는 없다. Supervisor 가 조회 질의문을 대화에
@@ -436,7 +462,7 @@ additional_kwargs={"agent_name": "LocationAgent"})],
     }
 
 
-def status_node(state: _state.AgentState, config, model_name: str = None) -> dict:
+def status_node(state: _state.AgentState, config) -> _state.AgentState:
     """캐리어/설비 상태 조회."""
     print("[NODE] StatusAgent entered", flush=True)
     emit(config, "agent_status", {"agent": "StatusAgent", "detail": "상태 조회"})
@@ -466,7 +492,7 @@ additional_kwargs={"agent_name": "StatusAgent"})],
     }
 
 
-def log_node(state: _state.AgentState, config, model_name: str = None) -> dict:
+def log_node(state: _state.AgentState, config) -> _state.AgentState:
     """반송 이력 분석.
 
     needs-핸드오프 관련 코드는 없다 (location_node 와 동일한 이유).
@@ -504,7 +530,7 @@ additional_kwargs={"agent_name": "LogAgent"})],
     }
 
 
-def extract_node(state: _state.AgentState, config, model_name: str = None) -> dict:
+def extract_node(state: _state.AgentState, config) -> _state.AgentState:
     """FAB / 파라미터 추출.
 
     Supervisor 진입 후 항상 가장 먼저 실행된다(모든 워커에 선행).
@@ -514,7 +540,7 @@ def extract_node(state: _state.AgentState, config, model_name: str = None) -> di
     emit(config, "agent_status", {"agent": "ExtractAgent", "detail": "FAB/파라미터 추출"})
 
     text = last_user_text(state.get("messages", []))
-    model = model_name or _model_of(state)
+    model = _model_of(state)
 
     # fab_extract_tool 상당 — 목업은 고정 FAB
     emit(config, "tool_call", {"agent": "ExtractAgent", "tool": "fab_extract_tool",
@@ -549,7 +575,7 @@ additional_kwargs={"agent_name": "ExtractAgent"})],
 
 
 # *************  [app — origin 의 action_node(react agent) 를 통째 교체]  *************
-async def action_node(state: _state.AgentState, config) -> dict:
+async def action_node(state: _state.AgentState, config) -> _state.AgentState:
     """명령 실행 — 턴 기반 HITL 상태기계 (_util.ActionService 에 위임)."""
     return await action_service.action_node(state, config)
 # *************
@@ -559,7 +585,7 @@ async def action_node(state: _state.AgentState, config) -> dict:
 # 최종 응답 노드 (스트리밍)
 # ─────────────────────────────────────────────────────────────────────────
 
-async def final_node(state: _state.AgentState, config, model_name: str = None) -> dict:
+async def final_node(state: _state.AgentState, config) -> _state.AgentState:
     """워커 결과를 받아 최종 답변을 만든다. (origin/_node.final_node 와 같은 틀)"""
     print("[NODE] FinalAnswer entered", flush=True)
     emit(config, "agent_status", {"agent": "FinalAnswerAgent", "detail": "최종 응답 생성"})
@@ -607,13 +633,13 @@ async def final_node(state: _state.AgentState, config, model_name: str = None) -
     }
 
 
-async def final_general_node(state: _state.AgentState, config, model_name: str = None) -> dict:
+async def final_general_node(state: _state.AgentState, config) -> _state.AgentState:
     """일반 대화의 최종 답변. final_node 와 같은 모양이다."""
     print("[NODE] FinalGeneral entered", flush=True)
     emit(config, "agent_status", {"agent": "FinalGeneralAgent", "detail": "일반 응답 생성"})
 
     out = await _agent.create_final_general_agent(
-        model_name=model_name or _model_of(state))(state, config)
+        model_name=_model_of(state))(state, config)
 
     msgs = out.get("messages", []) or []
 
