@@ -353,8 +353,19 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
                                  args=data.get("args"), result=data.get("result"))
 
     except asyncio.CancelledError:
-        # 클라이언트가 연결을 끊은 경우
-        print(f"[STREAM] thread={thread_id} 클라이언트 연결 종료", flush=True)
+        # 클라이언트가 연결을 끊은 경우 (프론트 타임아웃 포함).
+        #
+        # 중단 버튼(/chat/stop)과 같은 뒷정리를 해야 한다. 안 하면 이 턴의
+        # 원장이 _LEDGERS 에 영영 남아 메모리가 새고, 그 턴이 로그에서도
+        # 통째로 사라져 "왜 응답이 없었는지" 추적이 불가능해진다.
+        #
+        # action 스크래치는 일부러 건드리지 않는다. 턴 기반 HITL 에서는
+        # 사용자 응답을 기다리는 동안 HTTP 요청이 떠 있지 않으므로, 여기
+        # 도달했다는 건 '실행 중' 이었다는 뜻이다. 체크포인트는 마지막으로
+        # 완료된 스텝에 남아 있으니, 사용자가 다시 보내면 그 지점부터
+        # 이어진다 — 여기서 리셋하면 그때까지 수집한 파라미터가 날아간다.
+        print(f"[STREAM] thread={thread_id} 클라이언트 연결 종료 -> 원장 정리", flush=True)
+        _write_turn_log(thread_id, "disconnected", effective_model_name)
         raise
 
     except Exception as e:
