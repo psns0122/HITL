@@ -51,3 +51,6 @@ python-dotenv>=1.0.0
 # Only needed to execute notebooks/hitl_demo.ipynb.
 # ipykernel>=6.29.0
 # nbclient>=0.10.0
+
+# 서버 렌더 SSE(/chat/stream/html) 에서 마크다운 -> HTML 변환에 쓴다
+markdown>=3.5

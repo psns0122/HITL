@@ -78,27 +78,133 @@ AGENT_NODES = list(members) + [
 ]
 
 
-def _event(payload: dict) -> str:
-    """제어 프레임 하나를 SSE 형식으로 만든다. event 이름 = payload["type"]."""
-    data = json.dumps(payload, ensure_ascii=False, default=str)
-    return f"event: {payload.get('type', 'message')}\ndata: {data}\n\n"
+def _event(payload: dict) -> dict:
+    """제어 이벤트 하나. (SSE 직렬화는 엔드포인트가 한다)"""
+    return payload
 
 
-def _token(text: str) -> str:
-    """답변 토큰 하나를 SSE 형식으로 만든다."""
-    data = json.dumps({"text": text}, ensure_ascii=False)
-    return f"event: token\ndata: {data}\n\n"
+def _token(text: str) -> dict:
+    """답변 토큰 하나."""
+    return {"type": "token", "text": text}
 
 
-def _trace(agent, tool=None, args=None, result=None) -> str:
-    """트레이스 프레임. 노드 진입과 툴 실행을 하나의 이벤트로 합쳤다.
+def _trace(agent, tool=None, args=None, result=None) -> dict:
+    """트레이스 이벤트. 노드 진입과 툴 실행을 하나의 이벤트로 합쳤다.
 
     필드는 항상 4개 전부 실린다 (없으면 null).
       tool == null : 노드 진입
       tool != null : 툴 실행 (args=입력, result=결과 — 시작/종료에 나눠 옴)
     """
-    return _event({"type": "trace", "agent": agent,
-                   "tool": tool, "args": args, "result": result})
+    return {"type": "trace", "agent": agent,
+            "tool": tool, "args": args, "result": result}
+
+
+def _sse(payload: dict) -> str:
+    """이벤트 dict -> SSE 프레임 한 개. event 이름 = payload["type"]."""
+    body = {k: v for k, v in payload.items() if k != "type"}
+    data = json.dumps(body, ensure_ascii=False, default=str)
+    return f"event: {payload.get('type', 'message')}\ndata: {data}\n\n"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 마크다운 스트리머 — 서버 렌더 엔드포인트(/chat/stream/html)용
+#
+# 표를 토큰 단위로 그대로 흘리면 "| 장비 |" 가 반쯤 그려진 채 화면에 뜬다.
+# 그래서 텍스트는 날것으로 흘리되(타이핑 느낌 유지), 표/코드블록은 블록이
+# 완결될 때까지 모았다가 렌더된 HTML 로 한 번에 내보낸다.
+#
+# delta 는 feed() 호출당 하나로 묶어 낸다. 글자마다 내보내도 같은 feed 안이라
+# 시간 간격이 0.003ms 라 화면(16ms 주사율)에는 똑같이 보이는데, 프레임 수와
+# 클라이언트 렌더 호출만 4배가 된다(실측).
+# ─────────────────────────────────────────────────────────────────────────
+
+MD_EXT = ["tables", "fenced_code", "sane_lists"]
+
+
+def _md(text: str) -> str:
+    """마크다운 -> HTML. markdown 패키지가 없으면 원문을 그대로 감싼다."""
+    try:
+        import markdown
+    except ImportError:
+        return f"<p>{text}</p>"
+    return markdown.markdown(text, extensions=MD_EXT)
+
+
+class MarkdownStreamer:
+    """토큰 스트림 -> delta(날것) / commit(렌더된 HTML) 이벤트."""
+
+    def __init__(self):
+        self.line = ""
+        self.mode = "text"       # text | table | code
+        self.buf = []            # 표/코드 라인 모음
+
+    def feed(self, token: str):
+        pending = []             # 이번 토큰에서 나온 delta 를 모은다
+
+        for ch in token:
+            if ch == "\n":
+                if pending:
+                    yield {"type": "delta", "text": "".join(pending)}
+                    pending = []
+                yield from self._end_line()
+                continue
+
+            # 모드 전환은 라인 시작 시점에만 판정한다
+            if self.line.strip() == "":
+                if self.mode == "text" and ch == "|":
+                    if pending:
+                        yield {"type": "delta", "text": "".join(pending)}
+                        pending = []
+                    self.mode = "table"
+                elif self.mode == "table" and ch != "|":
+                    yield self._flush()      # 표 끝남
+                    self.mode = "text"
+
+            self.line += ch
+            if self.mode == "text":
+                pending.append(ch)
+
+        if pending:
+            yield {"type": "delta", "text": "".join(pending)}
+
+    def _end_line(self):
+        line, self.line = self.line, ""
+
+        if self.mode == "table":
+            self.buf.append(line)
+            return
+
+        if self.mode == "code":
+            self.buf.append(line)
+            if line.strip().startswith("```"):
+                yield self._flush()
+                self.mode = "text"
+            return
+
+        if line.strip().startswith("```"):
+            self.mode = "code"
+            self.buf.append(line)
+            return
+
+        yield {"type": "commit",
+               "html": _md(line) if line.strip() else "<br>"}
+
+    def _flush(self) -> dict:
+        html = _md("\n".join(self.buf))
+        self.buf = []
+        return {"type": "commit", "html": html}
+
+    def close(self):
+        """남은 버퍼를 비운다. done 은 내지 않는다 — 그건 턴이 낸다."""
+        if self.line:
+            if self.mode == "text":
+                yield {"type": "commit", "html": _md(self.line)}
+            else:
+                self.buf.append(self.line)
+            self.line = ""
+
+        if self.buf:
+            yield self._flush()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -240,8 +346,15 @@ def _stop_flags(request: Request) -> dict:
 # POST /chat/stream
 # ─────────────────────────────────────────────────────────────────────────
 
-async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, None]:
-    """실제 스트리밍 본체."""
+async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[dict, None]:
+    """실제 스트리밍 본체 — **의미 단위 이벤트(dict)** 를 낸다.
+
+    표현(SSE 직렬화, 마크다운 렌더)은 여기서 하지 않는다. 엔드포인트가
+    같은 이벤트 흐름을 받아 각자의 방식으로 포맷한다. 그래야 그래프 구동·
+    토큰 집계·HITL·로깅이 한 벌로 유지된다.
+
+    내는 이벤트: token / trace / needs_input / usage / done
+    """
     thread_id = req.thread_id
     effective_model_name = req.model_name
 
@@ -411,25 +524,66 @@ async def _generate(req: ChatRequest, stop_flags: dict) -> AsyncGenerator[str, N
     _write_turn_log(thread_id, "complete", effective_model_name)
 
 
+SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+}
+
+
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request):
-    """사용자 질문 -> 스트리밍 응답.
+    """웹 프론트용 — 답변을 **마크다운 원문**으로 흘린다.
+
+    렌더는 클라이언트가 한다(웹은 마크다운 렌더러가 흔하다). 이벤트는
+    _generate 가 내는 것 그대로다: token / trace / needs_input / usage / done.
 
     HITL 대기 중인 스레드면 같은 엔드포인트가 재개를 처리한다.
     """
-    # 이번 스레드의 중단 플래그를 초기화한다
     flags = _stop_flags(request)
     flags[req.thread_id] = False
 
-    return StreamingResponse(
-        _generate(req, flags),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+    async def gen():
+        async for ev in _generate(req, flags):
+            yield _sse(ev)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers=SSE_HEADERS)
+
+
+@router.post("/chat/stream/html")
+async def chat_stream_html(req: ChatRequest, request: Request):
+    """데스크탑 앱(WebView2)용 — 답변을 **서버에서 HTML 로 렌더**해 흘린다.
+
+    /chat/stream 과 같은 턴 로직을 쓰고 표현만 다르다. token 이벤트만
+    MarkdownStreamer 를 태워 delta/commit 으로 바꾸고, 나머지 이벤트
+    (trace/needs_input/usage/done)는 그대로 통과시킨다.
+
+      delta  {"text": "..."}   날것 텍스트 조각. 즉시 표시(타이핑 느낌)
+      commit {"html": "..."}   블록 완결. 렌더된 HTML 로 교체
+
+    표/코드블록은 완결될 때까지 버퍼링되므로 반쯤 그려진 표가 노출되지 않는다.
+    needs_input 은 HTML 로 바꾸지 않는다 — 앱이 승인/거절 버튼을 네이티브로
+    그려야 하므로 구조화된 payload 그대로 보낸다.
+    """
+    flags = _stop_flags(request)
+    flags[req.thread_id] = False
+
+    async def gen():
+        streamer = MarkdownStreamer()
+        async for ev in _generate(req, flags):
+            if ev.get("type") == "token":
+                for out in streamer.feed(ev.get("text") or ""):
+                    yield _sse(out)
+                continue
+
+            # 텍스트가 아닌 이벤트가 오면 그전에 남은 블록을 먼저 비운다
+            for out in streamer.close():
+                yield _sse(out)
+            yield _sse(ev)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers=SSE_HEADERS)
 
 
 # ─────────────────────────────────────────────────────────────────────────
